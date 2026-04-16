@@ -118,11 +118,21 @@ def upload_equipment_photo(local_path: str, model: str) -> str:
 
 def _get_sheet():
     """Подключение к Google Sheets"""
+    import json as json_lib
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
     ]
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    
+    # Пробуем сначала из переменной окружения
+    creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+    if creds_json:
+        creds_info = json_lib.loads(creds_json)
+        creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+    else:
+        # Fallback на файл (для локальной разработки)
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    
     gc = gspread.authorize(creds)
     return gc.open_by_key(SHEETS_ID).sheet1
 
