@@ -27,9 +27,12 @@ def _ensure_folder(path: str):
                          headers=HEADERS,
                          params={'path': current})
         if r.status_code == 404:
-            requests.put(f'{YANDEX_API}/resources',
-                         headers=HEADERS,
-                         params={'path': current})
+            r2 = requests.put(f'{YANDEX_API}/resources',
+                              headers=HEADERS,
+                              params={'path': current})
+            # Ждём пока папка создастся
+            import time
+            time.sleep(1)
 
 
 def _get_folder_for_kp() -> str:
@@ -126,6 +129,7 @@ def _get_sheet():
     
     # Пробуем сначала из переменной окружения
     creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+    print(f"GOOGLE_CREDENTIALS_JSON present: {bool(creds_json)}")
     if creds_json:
         creds_info = json_lib.loads(creds_json)
         creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
