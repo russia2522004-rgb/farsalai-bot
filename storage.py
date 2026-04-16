@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 from datetime import datetime
 import gspread
@@ -27,12 +28,10 @@ def _ensure_folder(path: str):
                          headers=HEADERS,
                          params={'path': current})
         if r.status_code == 404:
-            r2 = requests.put(f'{YANDEX_API}/resources',
-                              headers=HEADERS,
-                              params={'path': current})
-            # Ждём пока папка создастся
-            import time
-            time.sleep(1)
+            requests.put(f'{YANDEX_API}/resources',
+                         headers=HEADERS,
+                         params={'path': current})
+            time.sleep(1)  # Ждём пока папка создастся
 
 
 def _get_folder_for_kp() -> str:
@@ -51,7 +50,6 @@ def _get_folder_for_kp() -> str:
 def upload_file_to_yandex(local_path: str, remote_name: str, existing_resource_id: str = None) -> tuple[str, str]:
     """
     Загружает файл на Яндекс Диск.
-    Если existing_resource_id передан — перезаписывает файл.
     Возвращает (публичная ссылка, path на диске)
     """
     folder = _get_folder_for_kp()
@@ -68,10 +66,14 @@ def upload_file_to_yandex(local_path: str, remote_name: str, existing_resource_i
     with open(local_path, 'rb') as f:
         requests.put(upload_url, data=f)
 
+    time.sleep(1)
+
     # Публикуем файл
     requests.put(f'{YANDEX_API}/resources/publish',
                  headers=HEADERS,
                  params={'path': remote_path})
+
+    time.sleep(1)
 
     # Получаем публичную ссылку
     r = requests.get(f'{YANDEX_API}/resources',
@@ -121,22 +123,20 @@ def upload_equipment_photo(local_path: str, model: str) -> str:
 
 def _get_sheet():
     """Подключение к Google Sheets"""
-    import json as json_lib
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
         'https://www.googleapis.com/auth/drive'
     ]
-    
+
     # Пробуем сначала из переменной окружения
     creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
-    print(f"GOOGLE_CREDENTIALS_JSON present: {bool(creds_json)}")
     if creds_json:
-        creds_info = json_lib.loads(creds_json)
+        creds_info = json.loads(creds_json)
         creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     else:
         # Fallback на файл (для локальной разработки)
         creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
-    
+
     gc = gspread.authorize(creds)
     return gc.open_by_key(SHEETS_ID).sheet1
 
@@ -161,13 +161,12 @@ def add_kp_to_sheets(kp_data: dict, word_url: str, pdf_url: str) -> int:
     ]
 
     sheet.append_row(row)
-    return len(sheet.get_all_values())  # номер последней строки
+    return len(sheet.get_all_values())
 
 
 def update_kp_in_sheets(row_number: int, word_url: str, pdf_url: str):
     """Обновляет ссылки на файлы в Google Sheets при перезаписи"""
     sheet = _get_sheet()
-    # Колонки H и I (8 и 9) — Word и PDF ссылки
     sheet.update_cell(row_number, 8, word_url)
     sheet.update_cell(row_number, 9, pdf_url)
 
@@ -180,5 +179,4 @@ def ensure_headers():
         headers = ['Дата', 'Номер КП', 'Клиент', 'Оборудование',
                    'Сумма', 'Валюта', 'Менеджер', 'Word', 'PDF']
         sheet.insert_row(headers, 1)
-        # Форматируем заголовок жирным
         sheet.format('A1:I1', {'textFormat': {'bold': True}})
