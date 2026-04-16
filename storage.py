@@ -31,7 +31,7 @@ def _ensure_folder(path: str):
             requests.put(f'{YANDEX_API}/resources',
                          headers=HEADERS,
                          params={'path': current})
-            time.sleep(1)  # Ждём пока папка создастся
+            time.sleep(1)
 
 
 def _get_folder_for_kp() -> str:
@@ -55,10 +55,16 @@ def upload_file_to_yandex(local_path: str, remote_name: str, existing_resource_i
     folder = _get_folder_for_kp()
     remote_path = f'{folder}/{remote_name}'
 
+    # Удаляем файл если уже существует
+    requests.delete(f'{YANDEX_API}/resources',
+                    headers=HEADERS,
+                    params={'path': remote_path, 'permanently': 'true'})
+    time.sleep(1)
+
     # Получаем URL для загрузки
     r = requests.get(f'{YANDEX_API}/resources/upload',
                      headers=HEADERS,
-                     params={'path': remote_path, 'overwrite': 'true'})
+                     params={'path': remote_path})
     r.raise_for_status()
     upload_url = r.json()['href']
 
@@ -107,9 +113,14 @@ def upload_equipment_photo(local_path: str, model: str) -> str:
     remote_name = f'фото{ext}'
     remote_path = f'{folder}/{remote_name}'
 
+    requests.delete(f'{YANDEX_API}/resources',
+                    headers=HEADERS,
+                    params={'path': remote_path, 'permanently': 'true'})
+    time.sleep(1)
+
     r = requests.get(f'{YANDEX_API}/resources/upload',
                      headers=HEADERS,
-                     params={'path': remote_path, 'overwrite': 'true'})
+                     params={'path': remote_path})
     r.raise_for_status()
     upload_url = r.json()['href']
 
