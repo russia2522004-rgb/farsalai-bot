@@ -76,6 +76,18 @@ def _find_cyrillic_font():
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
+# Сначала ищем локальный шрифт в папке проекта
+    local_regular = 'fonts/DejaVuSans.ttf'
+    local_bold = 'fonts/DejaVuSans-Bold.ttf'
+    if os.path.exists(local_regular):
+        try:
+            pdfmetrics.registerFont(TTFont('CyrFont', local_regular))
+            pdfmetrics.registerFont(TTFont('CyrFont-Bold', local_bold if os.path.exists(local_bold) else local_regular))
+            print(f"Используем локальный шрифт: {local_regular}")
+            return 'CyrFont', 'CyrFont-Bold'
+        except Exception as e:
+            print(f"Локальный шрифт не подошёл: {e}")
+            
     font_paths = [
         # DejaVu
         ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'),
