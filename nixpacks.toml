@@ -1,5 +1,2 @@
 [phases.setup]
-nixPkgs = ["libreoffice-unwrapped"]
-
-[phases.build]
-cmds = ["pip install -r requirements.txt"]
+nixPkgs = []

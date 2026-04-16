@@ -1,9 +1,8 @@
 import os
 import json
-import subprocess
 from datetime import datetime
 from docx import Document
-from docx.shared import Inches, Pt
+from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from database import get_equipment_by_model
 
@@ -16,21 +15,17 @@ os.makedirs('template', exist_ok=True)
 
 def _replace_text_in_runs(paragraph, placeholder, value):
     """Заменяет плейсхолдер в параграфе с сохранением форматирования"""
-    # Сначала проверяем весь текст параграфа
     full_text = ''.join([run.text for run in paragraph.runs])
     if placeholder not in full_text:
         return False
 
-    # Если плейсхолдер в одном run
     for run in paragraph.runs:
         if placeholder in run.text:
             run.text = run.text.replace(placeholder, value)
             return True
 
-    # Если плейсхолдер разбит по нескольким runs — объединяем
     if placeholder in full_text:
         new_text = full_text.replace(placeholder, value)
-        # Очищаем все runs кроме первого
         for i, run in enumerate(paragraph.runs):
             if i == 0:
                 run.text = new_text
@@ -43,12 +38,10 @@ def _replace_text_in_runs(paragraph, placeholder, value):
 
 def _replace_in_document(doc, replacements: dict):
     """Заменяет все плейсхолдеры в документе"""
-    # В параграфах
     for paragraph in doc.paragraphs:
         for placeholder, value in replacements.items():
             _replace_text_in_runs(paragraph, placeholder, str(value))
 
-    # В таблицах
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -57,70 +50,75 @@ def _replace_in_document(doc, replacements: dict):
                         _replace_text_in_runs(paragraph, placeholder, str(value))
 
 
-def _replace_specs_table(doc, specs: list):
-    """Заменяет таблицу характеристик данными из библиотеки"""
+def _add_specs_after_heading(doc, specs: list):
+    """Добавляет таблицу характеристик после заголовка 'Технические характеристики'"""
     if not specs:
         return
 
-    # Находим таблицу с характеристиками (ищем по заголовку)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                full_text = ''.join([p.text for p in cell.paragraphs])
-                if 'Характеристика' in full_text or 'Материал' in full_text:
-                    # Нашли таблицу характеристик
-                    # Удаляем все строки кроме заголовка
-                    while len(table.rows) > 1:
-                        tr = table.rows[-1]._tr
-                        tr.getparent().remove(tr)
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    from docx.shared import Cm
 
-                    # Добавляем строки из библиотеки
-                    for spec in specs:
-                        row = table.add_row()
-                        row.cells[0].text = spec.get('name', '')
-                        row.cells[1].text = spec.get('value', '')
-                        # Делаем значение жирным
-                        for para in row.cells[1].paragraphs:
-                            for run in para.runs:
-                                run.bold = True
-                    return
+    # Находим параграф с заголовком
+    target_idx = None
+    for i, para in enumerate(doc.paragraphs):
+        if 'Технические характеристики' in para.text:
+            target_idx = i
+            break
+
+    if target_idx is None:
+        return
+
+    # Создаём таблицу характеристик
+    table = doc.add_table(rows=1, cols=2)
+    table.style = 'Table Grid'
+
+    # Заголовок таблицы
+    hdr = table.rows[0].cells
+    hdr[0].text = 'Характеристика'
+    hdr[1].text = 'Значение'
+    for cell in hdr:
+        for para in cell.paragraphs:
+            for run in para.runs:
+                run.bold = True
+
+    # Строки характеристик
+    for spec in specs:
+        row = table.add_row().cells
+        row[0].text = spec.get('name', '')
+        para = row[1].paragraphs[0]
+        run = para.add_run(str(spec.get('value', '')))
+        run.bold = True
+
+    # Перемещаем таблицу после заголовка
+    target_para = doc.paragraphs[target_idx]._element
+    target_para.addnext(table._tbl)
 
 
 def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
-    """
-    Генерирует КП на основе шаблона.
-    Возвращает (путь к docx, путь к pdf)
-    """
+    """Генерирует КП на основе шаблона. Возвращает (путь к docx, путь к pdf)"""
     kp_number = kp_data.get('kp_number', 'KP-001')
     kp_date = kp_data.get('kp_date', datetime.now().strftime('%d.%m.%Y'))
     items = kp_data.get('items', [])
 
-    # Берём первую позицию (основное оборудование)
     item = items[0] if items else {}
     model = item.get('model', '')
     eq = get_equipment_by_model(model)
 
-    # Название оборудования
     equipment_name = eq['name'] if eq else item.get('name', model)
-
-    # Цена
-    quantity = item.get('quantity', 1)
     unit_price = item.get('unit_price', 0)
     currency = item.get('currency', kp_data.get('currency', 'ЮАНЕЙ'))
 
     if len(items) > 1:
-        # Несколько позиций — показываем итог
         price_str = f"{kp_data.get('total_price', 0):,.0f} {kp_data.get('currency', 'ЮАНЕЙ')} (итого за все позиции)"
     else:
         price_str = f"{unit_price:,.0f} {currency}"
 
-    # Загружаем шаблон
     if os.path.exists(TEMPLATE_PATH):
         doc = Document(TEMPLATE_PATH)
     else:
         raise FileNotFoundError(f"Шаблон не найден: {TEMPLATE_PATH}")
 
-    # Заменяем плейсхолдеры
     replacements = {
         '{{DATE}}': kp_date,
         '{{KP_NUMBER}}': kp_number,
@@ -133,51 +131,138 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
 
     _replace_in_document(doc, replacements)
 
-    # Заменяем таблицу характеристик если есть данные в библиотеке
+    # Добавляем характеристики из библиотеки
     if eq and eq.get('specs'):
         try:
             specs = json.loads(eq['specs']) if isinstance(eq['specs'], str) else eq['specs']
             if specs:
-                _replace_specs_table(doc, specs)
+                _add_specs_after_heading(doc, specs)
         except Exception as e:
-            print(f"Ошибка замены характеристик: {e}")
+            print(f"Ошибка добавления характеристик: {e}")
 
-    # Сохраняем Word
     docx_path = os.path.join(OUTPUT_DIR, f'КП_{kp_number}.docx')
     doc.save(docx_path)
 
-    # Конвертируем в PDF
-    pdf_path = _convert_to_pdf(docx_path, kp_number)
+    pdf_path = _convert_to_pdf_reportlab(kp_data, equipment_name, kp_number, kp_date, eq)
 
     return docx_path, pdf_path
 
 
-def _convert_to_pdf(docx_path: str, kp_number: str) -> str:
-    """Конвертирует Word в PDF"""
+def _convert_to_pdf_reportlab(kp_data: dict, equipment_name: str, kp_number: str, kp_date: str, eq: dict) -> str:
+    """Генерирует PDF через reportlab"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import io
+
     pdf_path = os.path.join(OUTPUT_DIR, f'КП_{kp_number}.pdf')
 
+    # Регистрируем шрифт с поддержкой кириллицы
     try:
-        # Пробуем LibreOffice
-        result = subprocess.run([
-            'soffice', '--headless', '--convert-to', 'pdf',
-            '--outdir', OUTPUT_DIR, docx_path
-        ], check=True, capture_output=True, timeout=60)
-
-        # LibreOffice сохраняет с тем же именем но .pdf
-        generated = docx_path.replace('.docx', '.pdf')
-        if os.path.exists(generated) and generated != pdf_path:
-            os.rename(generated, pdf_path)
-
-    except Exception as e1:
-        print(f"LibreOffice недоступен: {e1}")
+        pdfmetrics.registerFont(TTFont('Arial', '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'))
+        pdfmetrics.registerFont(TTFont('Arial-Bold', '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf'))
+        font_name = 'Arial'
+        font_bold = 'Arial-Bold'
+    except Exception:
         try:
-            from docx2pdf import convert
-            convert(docx_path, pdf_path)
-        except Exception as e2:
-            print(f"docx2pdf недоступен: {e2}")
-            # Возвращаем docx как fallback
-            return docx_path
+            pdfmetrics.registerFont(TTFont('DejaVu', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
+            pdfmetrics.registerFont(TTFont('DejaVu-Bold', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'))
+            font_name = 'DejaVu'
+            font_bold = 'DejaVu-Bold'
+        except Exception:
+            font_name = 'Helvetica'
+            font_bold = 'Helvetica-Bold'
 
+    doc = SimpleDocTemplate(
+        pdf_path,
+        pagesize=A4,
+        leftMargin=2*cm,
+        rightMargin=1.5*cm,
+        topMargin=2*cm,
+        bottomMargin=2*cm
+    )
+
+    styles = getSampleStyleSheet()
+    normal = ParagraphStyle('normal', fontName=font_name, fontSize=10, leading=14)
+    bold = ParagraphStyle('bold', fontName=font_bold, fontSize=10, leading=14)
+    title = ParagraphStyle('title', fontName=font_bold, fontSize=14, leading=18, alignment=1)
+    subtitle = ParagraphStyle('subtitle', fontName=font_bold, fontSize=12, leading=16, alignment=1)
+    right = ParagraphStyle('right', fontName=font_name, fontSize=10, leading=14, alignment=2)
+
+    story = []
+
+    # Шапка
+    story.append(Paragraph(f'от {kp_date}    №    {kp_number}', right))
+    story.append(Paragraph('г. Таганрог', right))
+    story.append(Spacer(1, 0.5*cm))
+
+    # Заголовок
+    story.append(Paragraph('КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ', title))
+    story.append(Spacer(1, 0.3*cm))
+    story.append(Paragraph('ООО «Фарсал» предлагает к поставке', subtitle))
+    story.append(Spacer(1, 0.3*cm))
+    story.append(Paragraph(equipment_name, subtitle))
+    story.append(Spacer(1, 0.5*cm))
+
+    # Технические характеристики
+    if eq and eq.get('specs'):
+        try:
+            specs = json.loads(eq['specs']) if isinstance(eq['specs'], str) else eq['specs']
+            if specs:
+                story.append(Paragraph('Технические характеристики', bold))
+                story.append(Spacer(1, 0.3*cm))
+
+                table_data = [['Характеристика', 'Значение']]
+                for spec in specs:
+                    table_data.append([spec.get('name', ''), spec.get('value', '')])
+
+                t = Table(table_data, colWidths=[9*cm, 8*cm])
+                t.setStyle(TableStyle([
+                    ('FONTNAME', (0, 0), (-1, 0), font_bold),
+                    ('FONTNAME', (0, 1), (-1, -1), font_name),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.lightblue),
+                    ('FONTNAME', (1, 1), (1, -1), font_bold),
+                ]))
+                story.append(t)
+                story.append(Spacer(1, 0.5*cm))
+        except Exception as e:
+            print(f"Ошибка PDF характеристик: {e}")
+
+    # Условия
+    items = kp_data.get('items', [])
+    item = items[0] if items else {}
+    unit_price = item.get('unit_price', 0)
+    currency = item.get('currency', kp_data.get('currency', 'ЮАНЕЙ'))
+
+    story.append(Paragraph('Гарантия', bold))
+    story.append(Paragraph('Гарантийный срок: 1 год. Изнашиваемые детали гарантийному обслуживанию не подлежат.', normal))
+    story.append(Spacer(1, 0.3*cm))
+    story.append(Paragraph(f'Сроки изготовления: {kp_data.get("production_time", "25–30 дней")}.', normal))
+    story.append(Paragraph(f'Упаковка: {kp_data.get("packaging", "экспортная деревянная тара (ящик)")}.', normal))
+    story.append(Paragraph(f'Условия оплаты: {kp_data.get("payment_terms", "50% – предоплата, 50% – по факту поставки")}.', normal))
+    story.append(Spacer(1, 0.3*cm))
+
+    if len(items) > 1:
+        price_str = f"{kp_data.get('total_price', 0):,.0f} {kp_data.get('currency', 'ЮАНЕЙ')} (итого)"
+    else:
+        price_str = f"{unit_price:,.0f} {currency}"
+
+    story.append(Paragraph(f'Цена с НДС с доставкой до завода покупателя за 1 штуку: {price_str}.', bold))
+    story.append(Spacer(1, 1*cm))
+
+    # Подпись
+    story.append(Paragraph('С уважением,', normal))
+    story.append(Paragraph('директор ООО «Фарсал»,', normal))
+    story.append(Spacer(1, 0.5*cm))
+    story.append(Paragraph('МП     _______________       А. Ю. Лавришко', normal))
+
+    doc.build(story)
     return pdf_path
 
 
