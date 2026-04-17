@@ -79,6 +79,49 @@ async def send_log(context, message: str):
         logger.error(f"Ошибка отправки лога: {e}")
 
 
+async def log_bot_response(context, manager_name: str, text: str):
+    """Логирует ответ бота менеджеру"""
+    if not LOG_CHANNEL_ID:
+        return
+    # Обрезаем длинные ответы
+    short_text = text[:500] + '...' if len(text) > 500 else text
+    # Убираем markdown разметку для лога
+    clean = short_text.replace('*', '').replace('_', '').replace('`', '')
+    await send_log(context,
+        f"🤖 <b>Ответ бота</b>\n"
+        f"👤 Менеджеру: {manager_name}\n"
+        f"💬 {clean}"
+    )
+
+
+async def log_files(context, manager_name: str, kp_number: str, docx_path: str, pdf_path: str):
+    """Пересылает файлы КП в канал логов"""
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=f"📎 <b>Файлы КП №{kp_number}</b>\n👤 Менеджер: {manager_name}",
+            parse_mode='HTML'
+        )
+        if os.path.exists(docx_path):
+            with open(docx_path, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=LOG_CHANNEL_ID,
+                    document=f,
+                    filename=f'КП_{kp_number}.docx'
+                )
+        if pdf_path and pdf_path.endswith('.pdf') and os.path.exists(pdf_path):
+            with open(pdf_path, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=LOG_CHANNEL_ID,
+                    document=f,
+                    filename=f'КП_{kp_number}.pdf'
+                )
+    except Exception as e:
+        logger.error(f"Ошибка отправки файлов в лог: {e}")
+
+
 async def transcribe_voice(file_path: str) -> str:
     with open(file_path, 'rb') as audio:
         transcript = openai_client.audio.transcriptions.create(
@@ -239,6 +282,8 @@ async def process_kp_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         clean_response = response.split('```json')[0].strip() if '```json' in response else response
         await update.message.reply_text(clean_response)
+        manager_name = get_manager_name(user_id, update.effective_user.full_name)
+        await log_bot_response(context, manager_name, clean_response)
 
 
 async def generate_and_send_kp(update, context, session, kp_data):
@@ -284,6 +329,9 @@ async def generate_and_send_kp(update, context, session, kp_data):
         if pdf_path.endswith('.pdf') and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
                 await update.message.reply_document(f, filename=f'КП_{kp_number}.pdf')
+
+        # Логируем файлы
+        await log_files(context, manager_name, kp_number, docx_path, pdf_path)
 
         cleanup_temp_files(docx_path, pdf_path)
 
@@ -356,6 +404,7 @@ async def process_edit_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await regenerate_kp(update, context, session, updated_data)
     else:
         await update.message.reply_text(response)
+        await log_bot_response(context, manager_name, response)
 
 
 async def regenerate_kp(update, context, session, kp_data):
@@ -381,6 +430,9 @@ async def regenerate_kp(update, context, session, kp_data):
         if pdf_path.endswith('.pdf') and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
                 await update.message.reply_document(f, filename=f'КП_{kp_number}.pdf')
+
+        # Логируем файлы
+        await log_files(context, manager_name, kp_number, docx_path, pdf_path)
 
         cleanup_temp_files(docx_path, pdf_path)
 
