@@ -23,36 +23,34 @@ from claude_agent import chat_with_claude, process_edit, extract_equipment_from_
 from document_generator import generate_kp_document, cleanup_temp_files
 from storage import upload_kp_files, add_kp_to_sheets, update_kp_in_sheets, ensure_headers, upload_equipment_photo
 
-# ── Логирование ──
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ── Константы состояний ──
 MAIN_MENU, CREATING_KP, EDITING_KP, ADDING_EQUIPMENT, SEARCHING_KP = range(5)
 
-# ── Авторизация ──
 ALLOWED_IDS = set(map(int, os.getenv('ALLOWED_USER_IDS', '').split(',')))
 ADMIN_ID = int(os.getenv('ALLOWED_USER_IDS', '0').split(',')[0])
+LOG_CHANNEL_ID = os.getenv('LOG_CHANNEL_ID')
 
-# ── OpenAI для Whisper ──
+# Имена менеджеров
+MANAGER_NAMES = {
+    177592975: 'ЛавАлеСер',
+    922595157: 'ЛавАлеЮр',
+}
+
 openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-
-# ── Хранилище сессий пользователей ──
-# user_sessions[user_id] = {
-#   'state': ...,
-#   'conversation': [...],  # история для Claude
-#   'kp_data': {...},       # текущие данные КП
-#   'kp_number': '...',     # номер КП
-#   'sheets_row': ...,      # строка в Sheets
-# }
 user_sessions = {}
 
 
 def is_allowed(user_id: int) -> bool:
     return user_id in ALLOWED_IDS
+
+
+def get_manager_name(user_id: int, fallback: str) -> str:
+    return MANAGER_NAMES.get(user_id, fallback)
 
 
 def get_session(user_id: int) -> dict:
@@ -67,8 +65,21 @@ def get_session(user_id: int) -> dict:
     return user_sessions[user_id]
 
 
+async def send_log(context, message: str):
+    """Отправляет сообщение в канал логов"""
+    if not LOG_CHANNEL_ID:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=LOG_CHANNEL_ID,
+            text=message,
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки лога: {e}")
+
+
 async def transcribe_voice(file_path: str) -> str:
-    """Транскрибирует голосовое сообщение через Whisper"""
     with open(file_path, 'rb') as audio:
         transcript = openai_client.audio.transcriptions.create(
             model='whisper-1',
@@ -79,21 +90,38 @@ async def transcribe_voice(file_path: str) -> str:
 
 
 async def handle_voice_or_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Получает текст из голосового или текстового сообщения"""
+    user = update.effective_user
+    manager_name = get_manager_name(user.id, user.full_name)
+
     if update.message.voice:
         voice = update.message.voice
         file = await context.bot.get_file(voice.file_id)
-        voice_path = f'temp_voice_{update.effective_user.id}.ogg'
+        voice_path = f'temp_voice_{user.id}.ogg'
         await file.download_to_drive(voice_path)
-
         await update.message.reply_text('🎙 Распознаю голос...')
         text = await transcribe_voice(voice_path)
         os.remove(voice_path)
-
         await update.message.reply_text(f'📝 Распознано: _{text}_', parse_mode='Markdown')
+
+        # Лог голосового
+        await send_log(context,
+            f"🎙 <b>Голосовое сообщение</b>\n"
+            f"👤 Менеджер: {manager_name}\n"
+            f"📝 Транскрипция: {text}"
+        )
         return text
 
-    return update.message.text
+    text = update.message.text
+    # Лог текстового (только если не кнопка меню)
+    menu_buttons = ['📄 Создать КП', '📚 Библиотека оборудования', '🔍 Найти КП',
+                    '📋 Последние КП', '✅ Готово, сохранить', '✏️ Внести правки', '❌ Отменить']
+    if text and text not in menu_buttons and not text.startswith('/'):
+        await send_log(context,
+            f"💬 <b>Текстовое сообщение</b>\n"
+            f"👤 Менеджер: {manager_name}\n"
+            f"📝 Текст: {text}"
+        )
+    return text
 
 
 # ─── Команды ─────────────────────────────────────────────────────────────────
@@ -113,11 +141,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ['📋 Последние КП'],
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
     await update.message.reply_text(
-        '👋 Добро пожаловать в *ФарсалИИ*!\n\n'
-        'Я помогу вам быстро подготовить коммерческое предложение.\n\n'
-        'Выберите действие:',
+        '👋 Добро пожаловать в *ФарсалИИ*!\n\nВыберите действие:',
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
@@ -133,8 +158,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '/cancel — отменить текущее действие\n'
         '/equipment — библиотека оборудования\n'
         '/history — последние КП\n'
-        '/find — найти КП\n\n'
-        'Вы можете отправлять *голосовые* или *текстовые* сообщения на любом этапе.',
+        '/find — найти КП',
         parse_mode='Markdown'
     )
 
@@ -143,7 +167,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_allowed(user_id):
         return
-
     session = get_session(user_id)
     session['state'] = MAIN_MENU
     session['conversation'] = []
@@ -155,7 +178,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ['📋 Последние КП'],
     ]
     await update.message.reply_text(
-        '❌ Действие отменено. Возвращаемся в главное меню.',
+        '❌ Действие отменено.',
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
@@ -169,18 +192,22 @@ async def start_kp_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session['conversation'] = []
     session['kp_data'] = None
 
+    manager_name = get_manager_name(user_id, update.effective_user.full_name)
+    await send_log(context,
+        f"📄 <b>Начало создания КП</b>\n"
+        f"👤 Менеджер: {manager_name}"
+    )
+
     await update.message.reply_text(
         '📄 *Создание нового КП*\n\n'
         'Опишите что нужно включить в коммерческое предложение.\n'
-        'Можно голосом или текстом.\n\n'
-        '_Например: "КП для ООО Ромашка, насос IE-2, 1 штука, цена 80 тысяч юаней"_',
+        'Можно голосом или текстом.',
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardRemove()
     )
 
 
 async def process_kp_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает сообщения при создании КП"""
     user_id = update.effective_user.id
     session = get_session(user_id)
 
@@ -188,51 +215,50 @@ async def process_kp_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not text:
         return
 
-    # Показываем что обрабатываем
     await context.bot.send_chat_action(update.effective_chat.id, 'typing')
-
-    # Отправляем Claude
     response, kp_data = chat_with_claude(session['conversation'], text)
 
     if kp_data:
-        # Данные собраны — генерируем КП
         session['kp_data'] = kp_data
-        await update.message.reply_text(
-            '✅ *Данные собраны!* Генерирую документ...',
-            parse_mode='Markdown'
+        await update.message.reply_text('✅ *Данные собраны!* Генерирую документ...', parse_mode='Markdown')
+
+        # Лог собранных данных
+        manager_name = get_manager_name(user_id, update.effective_user.full_name)
+        items_str = ', '.join([f"{i.get('name', i.get('model'))} x{i.get('quantity')} = {i.get('unit_price')} {i.get('currency', '')}" for i in kp_data.get('items', [])])
+        await send_log(context,
+            f"✅ <b>Данные КП собраны</b>\n"
+            f"👤 Менеджер: {manager_name}\n"
+            f"🏢 Клиент: {kp_data.get('client', '—')}\n"
+            f"📦 Позиции: {items_str}\n"
+            f"💰 Итого: {kp_data.get('total_price')} {kp_data.get('currency', '')}\n"
+            f"💳 Оплата: {kp_data.get('payment_terms', '—')}\n"
+            f"⏱ Срок: {kp_data.get('production_time', '—')}"
         )
+
         await generate_and_send_kp(update, context, session, kp_data)
     else:
-        # Продолжаем диалог
-        # Убираем JSON из ответа если есть
         clean_response = response.split('```json')[0].strip() if '```json' in response else response
         await update.message.reply_text(clean_response)
 
 
 async def generate_and_send_kp(update, context, session, kp_data):
-    """Генерирует и отправляет КП"""
     user_id = update.effective_user.id
-    user = update.effective_user
-    manager_name = user.full_name
+    manager_name = get_manager_name(user_id, update.effective_user.full_name)
 
-    # Генерируем номер КП
     models = [item.get('model', '') for item in kp_data.get('items', [])]
     kp_number = generate_kp_number(models)
     kp_data['kp_number'] = kp_number
     kp_data['kp_date'] = datetime.now().strftime('%d.%m.%Y')
     session['kp_number'] = kp_number
 
-    # Генерируем документ
     await context.bot.send_chat_action(update.effective_chat.id, 'upload_document')
 
     try:
         docx_path, pdf_path = generate_kp_document(kp_data, manager_name)
 
-        # Загружаем на Яндекс Диск
         await update.message.reply_text('☁️ Загружаю на Яндекс Диск...')
         word_url, pdf_url = upload_kp_files(docx_path, pdf_path, kp_number)
 
-        # Сохраняем в БД
         equipment_list = ', '.join([item.get('name', item.get('model')) for item in kp_data.get('items', [])])
         db_data = {
             'kp_number': kp_number,
@@ -248,18 +274,16 @@ async def generate_and_send_kp(update, context, session, kp_data):
             'yandex_pdf_url': pdf_url,
         }
 
-        # Добавляем в Google Sheets
         sheets_row = add_kp_to_sheets({**db_data}, word_url, pdf_url)
         db_data['sheets_row'] = sheets_row
         session['sheets_row'] = sheets_row
-
         save_kp(db_data)
 
-        # Отправляем файлы менеджеру
         with open(docx_path, 'rb') as f:
             await update.message.reply_document(f, filename=f'КП_{kp_number}.docx')
-        with open(pdf_path, 'rb') as f:
-            await update.message.reply_document(f, filename=f'КП_{kp_number}.pdf')
+        if pdf_path.endswith('.pdf') and os.path.exists(pdf_path):
+            with open(pdf_path, 'rb') as f:
+                await update.message.reply_document(f, filename=f'КП_{kp_number}.pdf')
 
         cleanup_temp_files(docx_path, pdf_path)
 
@@ -268,25 +292,36 @@ async def generate_and_send_kp(update, context, session, kp_data):
         keyboard = [['✅ Готово, сохранить', '✏️ Внести правки'], ['❌ Отменить']]
         await update.message.reply_text(
             f'📄 *КП №{kp_number} готово!*\n\n'
-            f'🔗 [Word на Яндекс Диске]({word_url})\n'
-            f'🔗 [PDF на Яндекс Диске]({pdf_url})\n\n'
+            f'🔗 [Word]({word_url}) | [PDF]({pdf_url})\n\n'
             'Проверьте документ. Нужны правки?',
             parse_mode='Markdown',
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
             disable_web_page_preview=True
         )
 
+        # Лог успешного КП
+        await send_log(context,
+            f"📄 <b>КП сформировано</b>\n"
+            f"👤 Менеджер: {manager_name}\n"
+            f"🔢 Номер: {kp_number}\n"
+            f"🏢 Клиент: {kp_data.get('client', '—')}\n"
+            f"📦 Оборудование: {equipment_list}\n"
+            f"🔗 <a href='{word_url}'>Word</a> | <a href='{pdf_url}'>PDF</a>"
+        )
+
     except Exception as e:
         logger.error(f'Ошибка генерации КП: {e}')
-        await update.message.reply_text(
-            f'❌ Ошибка при генерации КП: {str(e)}\n\nПопробуйте ещё раз или обратитесь к администратору.'
+        await send_log(context,
+            f"❌ <b>Ошибка генерации КП</b>\n"
+            f"👤 Менеджер: {manager_name}\n"
+            f"⚠️ Ошибка: {str(e)}"
         )
+        await update.message.reply_text(f'❌ Ошибка при генерации КП: {str(e)}')
 
 
 # ─── Редактирование КП ───────────────────────────────────────────────────────
 
 async def process_edit_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает правки к КП"""
     user_id = update.effective_user.id
     session = get_session(user_id)
 
@@ -294,7 +329,6 @@ async def process_edit_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not text:
         return
 
-    # Проверяем команды
     if text in ['✅ Готово, сохранить', 'готово', 'сохранить', 'отправляй']:
         await finalize_kp(update, context, session)
         return
@@ -303,9 +337,16 @@ async def process_edit_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await cancel(update, context)
         return
 
-    # Обрабатываем правку
     await context.bot.send_chat_action(update.effective_chat.id, 'typing')
     await update.message.reply_text('✏️ Вношу правки...')
+
+    manager_name = get_manager_name(user_id, update.effective_user.full_name)
+    await send_log(context,
+        f"✏️ <b>Правка КП</b>\n"
+        f"👤 Менеджер: {manager_name}\n"
+        f"🔢 КП: {session.get('kp_number', '—')}\n"
+        f"📝 Правка: {text}"
+    )
 
     response, updated_data = process_edit(session['conversation'], text)
 
@@ -318,43 +359,44 @@ async def process_edit_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def regenerate_kp(update, context, session, kp_data):
-    """Перегенерирует КП с правками"""
     user = update.effective_user
+    manager_name = get_manager_name(user.id, user.full_name)
     kp_number = session['kp_number']
     kp_data['kp_number'] = kp_number
 
     try:
-        docx_path, pdf_path = generate_kp_document(kp_data, user.full_name)
-
-        # Перезаписываем на Яндекс Диске
+        docx_path, pdf_path = generate_kp_document(kp_data, manager_name)
         word_url, pdf_url = upload_kp_files(docx_path, pdf_path, kp_number)
 
-        # Обновляем Sheets
         if session.get('sheets_row'):
             update_kp_in_sheets(session['sheets_row'], word_url, pdf_url)
 
-        # Обновляем БД
         update_kp(kp_number, {
             'yandex_word_url': word_url,
             'yandex_pdf_url': pdf_url,
         })
 
-        # Отправляем новые файлы
         with open(docx_path, 'rb') as f:
             await update.message.reply_document(f, filename=f'КП_{kp_number}.docx')
-        with open(pdf_path, 'rb') as f:
-            await update.message.reply_document(f, filename=f'КП_{kp_number}.pdf')
+        if pdf_path.endswith('.pdf') and os.path.exists(pdf_path):
+            with open(pdf_path, 'rb') as f:
+                await update.message.reply_document(f, filename=f'КП_{kp_number}.pdf')
 
         cleanup_temp_files(docx_path, pdf_path)
 
         keyboard = [['✅ Готово, сохранить', '✏️ Внести правки'], ['❌ Отменить']]
         await update.message.reply_text(
-            f'✅ КП обновлено!\n\n'
-            f'🔗 [Word]({word_url}) | [PDF]({pdf_url})\n\n'
-            'Ещё правки нужны?',
+            f'✅ КП обновлено!\n\n🔗 [Word]({word_url}) | [PDF]({pdf_url})\n\nЕщё правки нужны?',
             parse_mode='Markdown',
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
             disable_web_page_preview=True
+        )
+
+        await send_log(context,
+            f"🔄 <b>КП обновлено</b>\n"
+            f"👤 Менеджер: {manager_name}\n"
+            f"🔢 КП: {kp_number}\n"
+            f"🔗 <a href='{word_url}'>Word</a> | <a href='{pdf_url}'>PDF</a>"
         )
 
     except Exception as e:
@@ -363,8 +405,8 @@ async def regenerate_kp(update, context, session, kp_data):
 
 
 async def finalize_kp(update, context, session):
-    """Финализирует КП"""
     kp_number = session.get('kp_number', '—')
+    manager_name = get_manager_name(update.effective_user.id, update.effective_user.full_name)
     session['state'] = MAIN_MENU
     session['conversation'] = []
     session['kp_data'] = None
@@ -375,10 +417,15 @@ async def finalize_kp(update, context, session):
         ['📋 Последние КП'],
     ]
     await update.message.reply_text(
-        f'✅ *КП №{kp_number} сохранено!*\n\n'
-        'Документы сохранены на Яндекс Диске и в журнале Google Sheets.',
+        f'✅ *КП №{kp_number} сохранено!*',
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+    await send_log(context,
+        f"✅ <b>КП финализировано</b>\n"
+        f"👤 Менеджер: {manager_name}\n"
+        f"🔢 КП: {kp_number}"
     )
 
 
@@ -388,23 +435,20 @@ async def equipment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_allowed(user_id):
         return
-
     equipment = get_all_equipment()
     if not equipment:
-        text = '📚 *Библиотека оборудования пуста.*\n\nДобавьте оборудование командой /add\_equipment'
+        text = '📚 *Библиотека оборудования пуста.*\n\nОтправьте файл КП чтобы добавить оборудование.'
     else:
         lines = ['📚 *Библиотека оборудования:*\n']
         for eq in equipment:
             price = f"{eq['base_price']:,.0f} {eq['currency']}" if eq['base_price'] else 'цена не указана'
             lines.append(f"• *{eq['model']}* — {eq['name']} ({price})")
         text = '\n'.join(lines)
-        text += '\n\n_Для добавления нового оборудования отправьте файл КП или используйте /add\_equipment_'
-
+        text += '\n\n_Отправьте файл КП чтобы добавить новое оборудование_'
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает загруженный документ (КП для библиотеки)"""
     user_id = update.effective_user.id
     if not is_allowed(user_id):
         return
@@ -418,27 +462,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text('📄 Читаю документ...')
 
-    # Скачиваем файл
     file = await context.bot.get_file(doc.file_id)
     local_path = f'temp_{user_id}_{doc.file_name}'
     await file.download_to_drive(local_path)
 
     try:
-        # Извлекаем текст
         if doc.file_name.endswith('.docx'):
             from docx import Document as DocxDocument
             d = DocxDocument(local_path)
             doc_text = '\n'.join([p.text for p in d.paragraphs if p.text.strip()])
         else:
-            doc_text = 'PDF файл — текст извлечён частично'
+            doc_text = 'PDF файл'
 
         await update.message.reply_text('🤖 Анализирую содержимое...')
-
-        # Claude извлекает данные
         eq_data = extract_equipment_from_doc(doc_text)
 
         if eq_data:
-            # Показываем что распознали
             specs_preview = ''
             if eq_data.get('specs'):
                 specs = eq_data['specs'][:3]
@@ -455,10 +494,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             if specs_preview:
                 preview += f'\nХарактеристики (первые 3):\n{specs_preview}\n'
-
             preview += '\n✅ Сохранить в библиотеку?'
 
-            # Сохраняем данные в сессию для подтверждения
             session['pending_equipment'] = eq_data
             session['pending_equipment']['doc_path'] = local_path
 
@@ -470,7 +507,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             session['state'] = ADDING_EQUIPMENT
         else:
-            await update.message.reply_text('❌ Не удалось распознать данные. Попробуйте другой файл.')
+            await update.message.reply_text('❌ Не удалось распознать данные.')
             os.remove(local_path)
 
     except Exception as e:
@@ -481,7 +518,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Подтверждение добавления оборудования"""
     user_id = update.effective_user.id
     session = get_session(user_id)
     text = update.message.text
@@ -490,7 +526,6 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
         eq_data = session['pending_equipment']
         doc_path = eq_data.pop('doc_path', None)
 
-        # Конвертируем specs в JSON строку
         if isinstance(eq_data.get('specs'), list):
             eq_data['specs'] = json.dumps(eq_data['specs'], ensure_ascii=False)
 
@@ -501,6 +536,13 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
 
         session['pending_equipment'] = None
         session['state'] = MAIN_MENU
+
+        manager_name = get_manager_name(user_id, update.effective_user.full_name)
+        await send_log(context,
+            f"📚 <b>Добавлено оборудование</b>\n"
+            f"👤 Менеджер: {manager_name}\n"
+            f"📦 {eq_data.get('name')} (модель: {eq_data.get('model')})"
+        )
 
         keyboard = [
             ['📄 Создать КП'],
@@ -524,7 +566,6 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(user_id):
         return
 
-    # Администратор видит все, менеджер — только свои
     if user_id == ADMIN_ID:
         kps = get_recent_kp(limit=10)
     else:
@@ -538,11 +579,8 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for kp in kps:
         lines.append(
             f"• *{kp['kp_number']}* от {kp['kp_date']}\n"
-            f"  Клиент: {kp['client'] or '—'}\n"
-            f"  Оборудование: {kp['equipment_list'] or '—'}\n"
-            f"  Сумма: {kp['total_price']:,.0f} {kp['currency']}\n"
+            f"  {kp.get('client') or '—'} | {kp.get('equipment_list') or '—'}\n"
         )
-
     await update.message.reply_text('\n'.join(lines), parse_mode='Markdown')
 
 
@@ -550,15 +588,10 @@ async def find_kp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_allowed(user_id):
         return
-
     session = get_session(user_id)
     session['state'] = SEARCHING_KP
-
     await update.message.reply_text(
-        '🔍 Введите для поиска:\n'
-        '• Название клиента\n'
-        '• Номер КП\n'
-        '• Название оборудования',
+        '🔍 Введите для поиска:\n• Название клиента\n• Номер КП\n• Название оборудования',
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -567,20 +600,19 @@ async def process_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session = get_session(user_id)
     query = update.message.text
-
     results = search_kp(query)
     session['state'] = MAIN_MENU
 
     if not results:
         await update.message.reply_text('❌ Ничего не найдено.')
     else:
-        lines = [f'🔍 *Результаты поиска по "{query}":*\n']
+        lines = [f'🔍 *Результаты по "{query}":*\n']
         for kp in results:
             word_link = f'[Word]({kp["yandex_word_url"]})' if kp.get('yandex_word_url') else '—'
             pdf_link = f'[PDF]({kp["yandex_pdf_url"]})' if kp.get('yandex_pdf_url') else '—'
             lines.append(
                 f"• *{kp['kp_number']}* от {kp['kp_date']}\n"
-                f"  {kp['client'] or '—'} | {kp['equipment_list'] or '—'}\n"
+                f"  {kp.get('client') or '—'} | {kp.get('equipment_list') or '—'}\n"
                 f"  {word_link} | {pdf_link}\n"
             )
         await update.message.reply_text(
@@ -594,13 +626,10 @@ async def process_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ['📚 Библиотека оборудования', '🔍 Найти КП'],
         ['📋 Последние КП'],
     ]
-    await update.message.reply_text(
-        'Что дальше?',
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
+    await update.message.reply_text('Что дальше?', reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
-# ─── Главный обработчик сообщений ────────────────────────────────────────────
+# ─── Главный обработчик ──────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -612,50 +641,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ''
     state = session['state']
 
-    # Главное меню — кнопки
     if text == '📄 Создать КП' or text == '/newkp':
         await start_kp_creation(update, context)
         session['state'] = CREATING_KP
         return
-
     if text == '📚 Библиотека оборудования' or text == '/equipment':
         await equipment_menu(update, context)
         return
-
     if text == '🔍 Найти КП' or text == '/find':
         await find_kp(update, context)
         return
-
     if text == '📋 Последние КП' or text == '/history':
         await show_history(update, context)
         return
 
-    # Маршрутизация по состоянию
     if state == CREATING_KP:
         await process_kp_message(update, context)
-
     elif state == EDITING_KP:
         await process_edit_message(update, context)
-
     elif state == ADDING_EQUIPMENT:
         await confirm_add_equipment(update, context)
-
     elif state == SEARCHING_KP:
         await process_search(update, context)
-
     else:
-        # Главное меню — неизвестная команда
-        await update.message.reply_text(
-            'Используйте кнопки меню или /start для начала.',
-        )
+        await update.message.reply_text('Используйте кнопки меню или /start для начала.')
 
 
 # ─── Запуск ──────────────────────────────────────────────────────────────────
 
 def main():
     init_db()
-
-    # Инициализируем заголовки Google Sheets
     try:
         ensure_headers()
     except Exception as e:
@@ -664,7 +679,6 @@ def main():
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     app = Application.builder().token(token).build()
 
-    # Команды
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('cancel', cancel))
@@ -672,15 +686,8 @@ def main():
     app.add_handler(CommandHandler('equipment', equipment_menu))
     app.add_handler(CommandHandler('history', show_history))
     app.add_handler(CommandHandler('find', find_kp))
-
-    # Документы
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-
-    # Голосовые и текстовые сообщения
-    app.add_handler(MessageHandler(
-        filters.TEXT | filters.VOICE,
-        handle_message
-    ))
+    app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
 
     logger.info('ФарсалИИ запущен!')
     app.run_polling(drop_pending_updates=True)
