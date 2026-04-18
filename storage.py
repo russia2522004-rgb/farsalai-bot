@@ -106,7 +106,7 @@ def upload_kp_files(word_path: str, pdf_path: str, kp_number: str) -> tuple[str,
 
 def upload_equipment_photo(local_path: str, model: str) -> str:
     """Загружает фото оборудования на Яндекс Диск"""
-    folder = f'{YANDEX_BASE_FOLDER}/Библиотека/{model}'
+    folder = f'ФарсалИИ/Библиотека/{model}'
     _ensure_folder(folder)
 
     ext = os.path.splitext(local_path)[1]
