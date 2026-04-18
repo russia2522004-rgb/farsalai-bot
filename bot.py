@@ -742,6 +742,7 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
     if action == 'new':
         # Новое оборудование
         if text in ['✅ Добавить']:
+            await update.message.reply_text('⏳ Сохраняю в библиотеку...')
             eq_data = session.get('pending_equipment', {})
             photo_path = eq_data.pop('_photo_path', None)
             if isinstance(eq_data.get('specs'), list):
