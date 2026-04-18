@@ -19,25 +19,36 @@ YANDEX_BASE_FOLDER = 'ФарсалИИ/КП'
 # ─── Яндекс Диск ─────────────────────────────────────────────────────────────
 
 def _ensure_folder(path: str):
-    """Создаёт папку на Яндекс Диске если не существует"""
-    parts = path.split('/')
+    """Создаёт папку на Яндекс Диске если не существует. Обрабатывает вложенные папки."""
+    parts = [p for p in path.strip('/').split('/') if p]
     current = ''
     for part in parts:
         current = f'{current}/{part}' if current else part
+        # Проверяем существует ли папка
         r = requests.get(f'{YANDEX_API}/resources',
                          headers=HEADERS,
                          params={'path': current})
-        if r.status_code == 404:
-            create_r = requests.put(f'{YANDEX_API}/resources',
-                                    headers=HEADERS,
-                                    params={'path': current})
-            time.sleep(2)  # увеличена пауза для надёжности
-            # Проверяем что папка создалась
-            check = requests.get(f'{YANDEX_API}/resources',
-                                 headers=HEADERS,
-                                 params={'path': current})
-            if check.status_code != 200:
-                print(f"Предупреждение: папка {current} возможно не создана")
+        if r.status_code == 200:
+            continue  # папка уже есть — идём дальше
+
+        # Папка не существует — создаём
+        r = requests.put(f'{YANDEX_API}/resources',
+                         headers=HEADERS,
+                         params={'path': current})
+
+        if r.status_code == 201:
+            time.sleep(0.5)  # небольшая пауза после создания
+            continue
+
+        if r.status_code == 409:
+            # Проверяем причину 409
+            error_code = r.json().get('error', '')
+            if 'ExistentDirectory' in error_code or 'AlreadyExists' in error_code:
+                continue  # папка уже есть — ок
+            # Иначе — реальная ошибка
+            print(f"Ошибка создания папки {current}: {error_code}")
+        else:
+            print(f"Неожиданный ответ при создании папки {current}: {r.status_code}")
 
 
 def _get_folder_for_kp() -> str:
