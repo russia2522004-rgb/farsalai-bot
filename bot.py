@@ -546,7 +546,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if doc.file_name.endswith('.docx'):
             from docx import Document as DocxDocument
             d = DocxDocument(local_path)
-            doc_text = '\n'.join([p.text for p in d.paragraphs if p.text.strip()])
+            # Извлекаем текст из параграфов
+            paragraphs_text = '\n'.join([p.text for p in d.paragraphs if p.text.strip()])
+            # Извлекаем текст из таблиц
+            tables_text = ''
+            for table in d.tables:
+                for row in table.rows:
+                    row_text = ' | '.join([cell.text.strip() for cell in row.cells if cell.text.strip()])
+                    if row_text:
+                        tables_text += row_text + '\n'
+            doc_text = paragraphs_text + '\n' + tables_text
             # Извлекаем фото
             photos = await extract_photos_from_docx(local_path)
         else:
@@ -746,8 +755,7 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
                     os.remove(photo_path)
                     await update.message.reply_text('🖼 Фото загружено на Яндекс Диск')
                 except Exception as e:
-                    logger.error(f"Ошибка загрузки фото: {e}")
-                    await update.message.reply_text(f'⚠️ Фото не загружено: {str(e)}')
+                    print(f"Ошибка загрузки фото: {e}")
 
             add_equipment(eq_data)
             await update.message.reply_text(f'✅ *{eq_data.get("name")}* добавлено!', parse_mode='Markdown')
