@@ -19,7 +19,7 @@ from database import (
     save_kp, update_kp, get_kp_by_number, search_kp, get_recent_kp,
     generate_kp_number
 )
-from claude_agent import chat_with_claude, process_edit, extract_equipment_from_doc
+from claude_agent import chat_with_claude, process_edit, extract_equipment_from_doc, extract_all_equipment_from_doc, compare_equipment, resolve_equipment_conflict
 from document_generator import generate_kp_document, cleanup_temp_files
 from storage import upload_kp_files, add_kp_to_sheets, update_kp_in_sheets, ensure_headers, upload_equipment_photo
 
@@ -500,6 +500,30 @@ async def equipment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
+async def extract_photos_from_docx(local_path: str) -> list:
+    """Извлекает фото из Word документа"""
+    photos = []
+    try:
+        import zipfile
+        with zipfile.ZipFile(local_path, 'r') as z:
+            media_files = [f for f in z.namelist() if f.startswith('word/media/') and
+                          any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp'])]
+            for media_file in media_files:
+                ext = os.path.splitext(media_file)[1]
+                temp_photo = f'temp_photo_{os.getpid()}_{len(photos)}{ext}'
+                with z.open(media_file) as src, open(temp_photo, 'wb') as dst:
+                    dst.write(src.read())
+                # Проверяем размер — пропускаем маленькие картинки (логотипы, иконки)
+                size = os.path.getsize(temp_photo)
+                if size > 10000:  # больше 10KB — скорее всего фото оборудования
+                    photos.append(temp_photo)
+                else:
+                    os.remove(temp_photo)
+    except Exception as e:
+        print(f"Ошибка извлечения фото: {e}")
+    return photos
+
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_allowed(user_id):
@@ -523,44 +547,45 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from docx import Document as DocxDocument
             d = DocxDocument(local_path)
             doc_text = '\n'.join([p.text for p in d.paragraphs if p.text.strip()])
+            # Извлекаем фото
+            photos = await extract_photos_from_docx(local_path)
         else:
             doc_text = 'PDF файл'
+            photos = []
 
         await update.message.reply_text('🤖 Анализирую содержимое...')
-        eq_data = extract_equipment_from_doc(doc_text)
+        items = extract_all_equipment_from_doc(doc_text)
 
-        if eq_data:
-            specs_preview = ''
-            if eq_data.get('specs'):
-                specs = eq_data['specs'][:3]
-                specs_preview = '\n'.join([f"  • {s['name']}: {s['value']}" for s in specs])
-                if len(eq_data['specs']) > 3:
-                    specs_preview += f'\n  • ...ещё {len(eq_data["specs"]) - 3} характеристик'
-
-            preview = (
-                f'📋 *Распознано:*\n\n'
-                f'Название: {eq_data.get("name", "—")}\n'
-                f'Модель: {eq_data.get("model", "—")}\n'
-                f'Цена: {eq_data.get("base_price", "—")} {eq_data.get("currency", "")}\n'
-                f'Срок: {eq_data.get("production_time", "—")}\n'
-            )
-            if specs_preview:
-                preview += f'\nХарактеристики (первые 3):\n{specs_preview}\n'
-            preview += '\n✅ Сохранить в библиотеку?'
-
-            session['pending_equipment'] = eq_data
-            session['pending_equipment']['doc_path'] = local_path
-
-            keyboard = [['✅ Сохранить', '❌ Отменить']]
-            await update.message.reply_text(
-                preview,
-                parse_mode='Markdown',
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            )
-            session['state'] = ADDING_EQUIPMENT
-        else:
-            await update.message.reply_text('❌ Не удалось распознать данные.')
+        if not items:
+            await update.message.reply_text('❌ Оборудование не распознано. Возможно это не КП?')
             os.remove(local_path)
+            for p in photos:
+                if os.path.exists(p):
+                    os.remove(p)
+            return
+
+        # Распределяем фото по позициям
+        # Если фото одно — привязываем к первой позиции
+        # Если несколько — по одному на каждую позицию
+        for i, item in enumerate(items):
+            if i < len(photos):
+                item['_photo_path'] = photos[i]
+            elif photos:
+                item['_photo_path'] = photos[0]  # одно фото для всех
+
+        # Сохраняем очередь для обработки
+        session['equipment_queue'] = items
+        session['equipment_queue_idx'] = 0
+        session['doc_path'] = local_path
+        session['state'] = ADDING_EQUIPMENT
+
+        photos_info = f', найдено фото: {len(photos)} шт.' if photos else ', фото не найдено'
+        await update.message.reply_text(
+            f'📋 Найдено позиций: *{len(items)}*{photos_info}\nОбрабатываю по очереди...',
+            parse_mode='Markdown'
+        )
+
+        await process_next_equipment(update, context, session)
 
     except Exception as e:
         logger.error(f'Ошибка обработки документа: {e}')
@@ -569,32 +594,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(local_path)
 
 
-async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    session = get_session(user_id)
-    text = update.message.text
+async def process_next_equipment(update, context, session):
+    """Обрабатывает следующую позицию из очереди"""
+    queue = session.get('equipment_queue', [])
+    idx = session.get('equipment_queue_idx', 0)
 
-    if text == '✅ Сохранить' and session.get('pending_equipment'):
-        eq_data = session['pending_equipment']
-        doc_path = eq_data.pop('doc_path', None)
-
-        if isinstance(eq_data.get('specs'), list):
-            eq_data['specs'] = json.dumps(eq_data['specs'], ensure_ascii=False)
-
-        eq_id = add_equipment(eq_data)
-
+    if idx >= len(queue):
+        # Все позиции обработаны
+        doc_path = session.get('doc_path')
         if doc_path and os.path.exists(doc_path):
             os.remove(doc_path)
-
-        session['pending_equipment'] = None
+        session['equipment_queue'] = []
         session['state'] = MAIN_MENU
-
-        manager_name = get_manager_name(user_id, update.effective_user.full_name)
-        await send_log(context,
-            f"📚 <b>Добавлено оборудование</b>\n"
-            f"👤 Менеджер: {manager_name}\n"
-            f"📦 {eq_data.get('name')} (модель: {eq_data.get('model')})"
-        )
 
         keyboard = [
             ['📄 Создать КП'],
@@ -602,13 +613,281 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
             ['📋 Последние КП'],
         ]
         await update.message.reply_text(
-            f'✅ *{eq_data.get("name")}* добавлено в библиотеку!',
+            '✅ Все позиции обработаны!',
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+
+    eq_data = queue[idx]
+    model = eq_data.get('model', '')
+    existing = get_equipment_by_model(model)
+
+    if not existing:
+        # Вариация 1 — новое оборудование
+        specs_preview = ''
+        if eq_data.get('specs'):
+            specs = eq_data['specs'][:3]
+            specs_preview = '\n'.join([f"  • {s['name']}: {s['value']}" for s in specs])
+            if len(eq_data['specs']) > 3:
+                specs_preview += f'\n  • ...ещё {len(eq_data["specs"]) - 3} характеристик'
+
+        text = (
+            f'🆕 *Новое оборудование [{idx+1}/{len(queue)}]:*\n\n'
+            f'Название: {eq_data.get("name", "—")}\n'
+            f'Модель: {model}\n'
+            f'Цена: {eq_data.get("base_price", "—")} {eq_data.get("currency", "")}\n'
+            f'Срок: {eq_data.get("production_time", "—")}\n'
+        )
+        if specs_preview:
+            text += f'\nХарактеристики:\n{specs_preview}\n'
+        text += '\nДобавить в библиотеку?'
+
+        session['pending_equipment'] = eq_data
+        keyboard = [['✅ Добавить', '⏭ Пропустить']]
+        await update.message.reply_text(
+            text,
             parse_mode='Markdown',
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
+
+    else:
+        # Сравниваем с существующим
+        differences = compare_equipment(existing, eq_data)
+
+        if not differences['has_changes']:
+            # Вариация 2 — нет изменений, пропускаем автоматически
+            await update.message.reply_text(
+                f'⏭ *{eq_data.get("name")}* [{idx+1}/{len(queue)}] — уже есть в библиотеке, изменений нет. Пропущено.',
+                parse_mode='Markdown'
+            )
+            session['equipment_queue_idx'] = idx + 1
+            await process_next_equipment(update, context, session)
+
+        elif differences['price_changed'] and not differences['specs_changed']:
+            # Вариация 4 — только цена изменилась
+            pc = differences['price_changed']
+            text = (
+                f'💰 *{eq_data.get("name")}* [{idx+1}/{len(queue)}]\n\n'
+                f'Цена изменилась:\n'
+                f'Было: {pc["old"]:,.0f} {pc["currency"]}\n'
+                f'Стало: {pc["new"]:,.0f} {pc["currency"]}\n\n'
+                f'Обновить цену?'
+            )
+            session['pending_equipment'] = eq_data
+            session['existing_equipment'] = existing
+            session['equipment_action'] = 'price_only'
+            keyboard = [['✅ Обновить цену', '⏭ Оставить старую']]
+            await update.message.reply_text(
+                text,
+                parse_mode='Markdown',
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+
+        else:
+            # Вариация 3 — характеристики отличаются
+            diff_lines = []
+            for d in differences['specs_changed'][:5]:
+                if d['type'] == 'changed':
+                    diff_lines.append(f"• {d['name']}: {d['old']} → {d['new']}")
+                elif d['type'] == 'added':
+                    diff_lines.append(f"• {d['name']}: нет → {d['new']} (новая)")
+                elif d['type'] == 'removed':
+                    diff_lines.append(f"• {d['name']}: {d['old']} → нет (удалена)")
+
+            if len(differences['specs_changed']) > 5:
+                diff_lines.append(f"• ...ещё {len(differences['specs_changed']) - 5} изменений")
+
+            if differences['price_changed']:
+                pc = differences['price_changed']
+                diff_lines.insert(0, f"• Цена: {pc['old']:,.0f} → {pc['new']:,.0f} {pc['currency']}")
+
+            text = (
+                f'⚠️ *{eq_data.get("name")}* [{idx+1}/{len(queue)}]\n\n'
+                f'Найдены отличия:\n' +
+                '\n'.join(diff_lines) +
+                '\n\nЧто сделать? Напишите или надиктуйте:\n'
+                '— "обновить всё" — взять все данные из нового файла\n'
+                '— "оставить старое" — не менять ничего\n'
+                '— или опишите что именно оставить/обновить'
+            )
+            session['pending_equipment'] = eq_data
+            session['existing_equipment'] = existing
+            session['equipment_differences'] = differences
+            session['equipment_action'] = 'conflict'
+            await update.message.reply_text(text, parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
+
+
+async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = get_session(user_id)
+
+    # Получаем текст (голос или текст)
+    text = await handle_voice_or_text(update, context)
+    if not text:
+        return
+
+    action = session.get('equipment_action', 'new')
+    idx = session.get('equipment_queue_idx', 0)
+    manager_name = get_manager_name(user_id, update.effective_user.full_name)
+
+    if action == 'new':
+        # Новое оборудование
+        if text in ['✅ Добавить']:
+            eq_data = session.get('pending_equipment', {})
+            photo_path = eq_data.pop('_photo_path', None)
+            if isinstance(eq_data.get('specs'), list):
+                eq_data['specs'] = json.dumps(eq_data['specs'], ensure_ascii=False)
+
+            # Загружаем фото на Яндекс Диск
+            if photo_path and os.path.exists(photo_path):
+                try:
+                    remote_path = upload_equipment_photo(photo_path, eq_data.get('model', 'unknown'))
+                    eq_data['photo_path'] = remote_path
+                    os.remove(photo_path)
+                    await update.message.reply_text('🖼 Фото загружено на Яндекс Диск')
+                except Exception as e:
+                    print(f"Ошибка загрузки фото: {e}")
+
+            add_equipment(eq_data)
+            await update.message.reply_text(f'✅ *{eq_data.get("name")}* добавлено!', parse_mode='Markdown')
+            await send_log(context,
+                f"📚 <b>Добавлено оборудование</b>\n"
+                f"👤 {manager_name}\n"
+                f"📦 {eq_data.get('name')} (модель: {eq_data.get('model')})"
+            )
+        else:
+            # Удаляем фото если пропускаем
+            eq_data = session.get('pending_equipment', {})
+            photo_path = eq_data.pop('_photo_path', None)
+            if photo_path and os.path.exists(photo_path):
+                os.remove(photo_path)
+            await update.message.reply_text('⏭ Пропущено.')
+
+        session['equipment_queue_idx'] = idx + 1
+        await process_next_equipment(update, context, session)
+
+    elif action == 'price_only':
+        if text in ['✅ Обновить цену']:
+            eq_data = session.get('pending_equipment', {})
+            update_equipment(eq_data.get('model'), {
+                'base_price': eq_data.get('base_price'),
+                'currency': eq_data.get('currency'),
+            })
+            await update.message.reply_text('✅ Цена обновлена!', parse_mode='Markdown')
+        else:
+            await update.message.reply_text('⏭ Цена не изменена.')
+
+        session['equipment_queue_idx'] = idx + 1
+        await process_next_equipment(update, context, session)
+
+    elif action == 'conflict':
+        # Голосовое/текстовое разрешение конфликта
+        existing = session.get('existing_equipment', {})
+        new_data = session.get('pending_equipment', {})
+        differences = session.get('equipment_differences', {})
+
+        if text.lower() in ['обновить всё', 'обновить все', 'обновить']:
+            # Берём все данные из нового файла
+            if isinstance(new_data.get('specs'), list):
+                new_data['specs'] = json.dumps(new_data['specs'], ensure_ascii=False)
+            add_equipment(new_data)
+            await update.message.reply_text('✅ Данные полностью обновлены!')
+        elif text.lower() in ['оставить старое', 'оставить', 'не менять']:
+            await update.message.reply_text('⏭ Оставлены старые данные.')
+        else:
+            # Claude разрешает конфликт по инструкции
+            await update.message.reply_text('🤖 Применяю инструкцию...')
+            resolved = resolve_equipment_conflict(existing, new_data, differences, text)
+            if isinstance(resolved.get('specs'), list):
+                resolved['specs'] = json.dumps(resolved['specs'], ensure_ascii=False)
+            add_equipment(resolved)
+            await update.message.reply_text('✅ Данные обновлены по вашей инструкции!')
+
+        session['equipment_queue_idx'] = idx + 1
+        await process_next_equipment(update, context, session)
     else:
         session['state'] = MAIN_MENU
         await cancel(update, context)
+
+
+# ─── Просмотр карточки оборудования ─────────────────────────────────────────
+
+async def show_equipment_card(update: Update, context: ContextTypes.DEFAULT_TYPE, model: str):
+    """Показывает карточку оборудования"""
+    eq = get_equipment_by_model(model)
+    if not eq:
+        await update.message.reply_text(f'❌ Оборудование "{model}" не найдено в библиотеке.')
+        return
+
+    specs_text = ''
+    if eq.get('specs'):
+        try:
+            specs = json.loads(eq['specs']) if isinstance(eq['specs'], str) else eq['specs']
+            specs_text = '\n'.join([f"  • {s['name']}: {s['value']}" for s in specs])
+        except Exception:
+            pass
+
+    price = f"{eq['base_price']:,.0f} {eq['currency']}" if eq.get('base_price') else 'не указана'
+    photo_info = '🖼 Фото есть' if eq.get('photo_path') else '📷 Фото нет'
+
+    text = (
+        f'📦 *{eq["name"]}*\n\n'
+        f'Модель: {eq["model"]}\n'
+        f'Цена: {price}\n'
+        f'Срок: {eq.get("production_time", "—")}\n'
+        f'Упаковка: {eq.get("packaging", "—")}\n'
+        f'{photo_info}\n'
+    )
+    if specs_text:
+        text += f'\n*Характеристики:*\n{specs_text}\n'
+
+    # Сохраняем модель для возможного удаления
+    session = get_session(update.effective_user.id)
+    session['viewing_equipment_model'] = eq['model']
+
+    keyboard = [['🗑 Удалить это оборудование', '◀️ Назад']]
+    await update.message.reply_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
+
+async def delete_equipment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет оборудование из библиотеки"""
+    user_id = update.effective_user.id
+    session = get_session(user_id)
+    model = session.get('viewing_equipment_model')
+
+    if not model:
+        await update.message.reply_text('❌ Не выбрано оборудование для удаления.')
+        return
+
+    eq = get_equipment_by_model(model)
+    if not eq:
+        await update.message.reply_text('❌ Оборудование не найдено.')
+        return
+
+    delete_equipment(model)
+    manager_name = get_manager_name(user_id, update.effective_user.full_name)
+
+    await send_log(context,
+        f"🗑 <b>Удалено оборудование</b>\n"
+        f"👤 {manager_name}\n"
+        f"📦 {eq.get('name')} (модель: {model})"
+    )
+
+    session['viewing_equipment_model'] = None
+    keyboard = [
+        ['📄 Создать КП'],
+        ['📚 Библиотека оборудования', '🔍 Найти КП'],
+        ['📋 Последние КП'],
+    ]
+    await update.message.reply_text(
+        f'🗑 *{eq.get("name")}* удалено из библиотеки.',
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
 
 
 # ─── История и поиск КП ──────────────────────────────────────────────────────
@@ -706,6 +985,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == '📋 Последние КП' or text == '/history':
         await show_history(update, context)
         return
+    if text == '🗑 Удалить это оборудование':
+        await delete_equipment_command(update, context)
+        return
+    if text == '◀️ Назад':
+        await equipment_menu(update, context)
+        return
+    # Поиск оборудования по названию — "покажи IE-2" или "что есть по F-110"
+    if any(kw in text.lower() for kw in ['покажи', 'покажи', 'что есть', 'карточка', 'info']):
+        words = text.split()
+        for word in words:
+            if len(word) > 2 and word not in ['покажи', 'что', 'есть', 'по', 'карточка']:
+                await show_equipment_card(update, context, word)
+                return
 
     if state == CREATING_KP:
         await process_kp_message(update, context)
