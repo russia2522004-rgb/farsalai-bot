@@ -28,19 +28,25 @@ def _ensure_folder(path: str):
                          headers=HEADERS,
                          params={'path': current})
         if r.status_code == 404:
-            requests.put(f'{YANDEX_API}/resources',
-                         headers=HEADERS,
-                         params={'path': current})
-            time.sleep(1)
+            create_r = requests.put(f'{YANDEX_API}/resources',
+                                    headers=HEADERS,
+                                    params={'path': current})
+            time.sleep(2)  # увеличена пауза для надёжности
+            # Проверяем что папка создалась
+            check = requests.get(f'{YANDEX_API}/resources',
+                                 headers=HEADERS,
+                                 params={'path': current})
+            if check.status_code != 200:
+                print(f"Предупреждение: папка {current} возможно не создана")
 
 
 def _get_folder_for_kp() -> str:
     """Возвращает путь папки для текущего месяца"""
     now = datetime.now()
     month_names = {
-        1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель',
-        5: 'Май', 6: 'Июнь', 7: 'Июль', 8: 'Август',
-        9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'
+        1: 'январь', 2: 'февраль', 3: 'март', 4: 'апрель',
+        5: 'май', 6: 'июнь', 7: 'июль', 8: 'август',
+        9: 'сентябрь', 10: 'октябрь', 11: 'ноябрь', 12: 'декабрь'
     }
     folder = f'{YANDEX_BASE_FOLDER}/{now.year}/{month_names[now.month]}'
     _ensure_folder(folder)
@@ -106,18 +112,17 @@ def upload_kp_files(word_path: str, pdf_path: str, kp_number: str) -> tuple[str,
 
 def upload_equipment_photo(local_path: str, model: str) -> str:
     """Загружает фото оборудования на Яндекс Диск"""
-    folder = f'ФарсалИИ/Библиотека/{model}'
+    folder = f'{YANDEX_BASE_FOLDER}/Библиотека/{model}'
     _ensure_folder(folder)
 
     ext = os.path.splitext(local_path)[1]
     remote_name = f'фото{ext}'
     remote_path = f'{folder}/{remote_name}'
 
-    # Удаляем если уже существует
     requests.delete(f'{YANDEX_API}/resources',
                     headers=HEADERS,
                     params={'path': remote_path, 'permanently': 'true'})
-    time.sleep(3)
+    time.sleep(1)
 
     r = requests.get(f'{YANDEX_API}/resources/upload',
                      headers=HEADERS,
@@ -128,7 +133,6 @@ def upload_equipment_photo(local_path: str, model: str) -> str:
     with open(local_path, 'rb') as f:
         requests.put(upload_url, data=f)
 
-    time.sleep(1)
     return remote_path
 
 
