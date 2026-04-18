@@ -746,7 +746,8 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
                     os.remove(photo_path)
                     await update.message.reply_text('🖼 Фото загружено на Яндекс Диск')
                 except Exception as e:
-                    print(f"Ошибка загрузки фото: {e}")
+                    logger.error(f"Ошибка загрузки фото: {e}")
+                    await update.message.reply_text(f'⚠️ Фото не загружено: {str(e)}')
 
             add_equipment(eq_data)
             await update.message.reply_text(f'✅ *{eq_data.get("name")}* добавлено!', parse_mode='Markdown')
