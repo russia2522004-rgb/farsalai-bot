@@ -117,7 +117,7 @@ def upload_equipment_photo(local_path: str, model: str) -> str:
     requests.delete(f'{YANDEX_API}/resources',
                     headers=HEADERS,
                     params={'path': remote_path, 'permanently': 'true'})
-    time.sleep(1)
+    time.sleep(3)
 
     r = requests.get(f'{YANDEX_API}/resources/upload',
                      headers=HEADERS,
