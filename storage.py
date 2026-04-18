@@ -113,6 +113,7 @@ def upload_equipment_photo(local_path: str, model: str) -> str:
     remote_name = f'фото{ext}'
     remote_path = f'{folder}/{remote_name}'
 
+    # Удаляем если уже существует
     requests.delete(f'{YANDEX_API}/resources',
                     headers=HEADERS,
                     params={'path': remote_path, 'permanently': 'true'})
@@ -127,6 +128,7 @@ def upload_equipment_photo(local_path: str, model: str) -> str:
     with open(local_path, 'rb') as f:
         requests.put(upload_url, data=f)
 
+    time.sleep(1)
     return remote_path
 
 
