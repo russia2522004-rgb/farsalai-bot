@@ -545,10 +545,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if doc.file_name.endswith('.docx'):
             from docx import Document as DocxDocument
+            from block_extractor import extract_blocks_from_docx, extract_conditions_from_docx, extract_equipment_name_from_docx
+
             d = DocxDocument(local_path)
-            # Извлекаем текст из параграфов
             paragraphs_text = '\n'.join([p.text for p in d.paragraphs if p.text.strip()])
-            # Извлекаем текст из таблиц
             tables_text = ''
             for table in d.tables:
                 for row in table.rows:
@@ -556,14 +556,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if row_text:
                         tables_text += row_text + '\n'
             doc_text = paragraphs_text + '\n' + tables_text
-            # Извлекаем фото
+
+            # Извлекаем блоки и условия напрямую из XML
+            eq_name = extract_equipment_name_from_docx(local_path)
+            xml_blocks = extract_blocks_from_docx(local_path, eq_name)
+            conditions = extract_conditions_from_docx(local_path)
             photos = await extract_photos_from_docx(local_path)
         else:
             doc_text = 'PDF файл'
             photos = []
+            xml_blocks = []
+            conditions = {}
 
         await update.message.reply_text('🤖 Анализирую содержимое...')
-        items = extract_all_equipment_from_doc(doc_text)
+        items = extract_all_equipment_from_doc(doc_text, doc_path=local_path)
 
         if not items:
             await update.message.reply_text('❌ Оборудование не распознано. Возможно это не КП?')
@@ -573,15 +579,23 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     os.remove(p)
             return
 
+        # Обогащаем данными из прямого XML-извлечения
+        if items:
+            items[0]['blocks'] = xml_blocks
+            for key in ['warranty', 'production_time', 'packaging', 'payment_terms', 'delivery']:
+                if conditions.get(key) and not items[0].get(key):
+                    items[0][key] = conditions[key]
+            if conditions.get('base_price') and not items[0].get('base_price'):
+                items[0]['base_price'] = conditions['base_price']
+            if conditions.get('currency') and not items[0].get('currency'):
+                items[0]['currency'] = conditions['currency']
+
         # Распределяем фото по позициям
         for i, item in enumerate(items):
             if i < len(photos):
                 item['_photo_path'] = photos[i]
             elif photos:
                 item['_photo_path'] = photos[0]
-
-            # Блоки уже внутри item['blocks'] если извлеклись
-            # Убеждаемся что поле есть
             if 'blocks' not in item:
                 item['blocks'] = []
 
@@ -745,6 +759,7 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
     if action == 'new':
         # Новое оборудование
         if text in ['✅ Добавить']:
+            await update.message.reply_text('⏳ Обрабатываю — загружаю фото и сохраняю блоки...')
             eq_data = session.get('pending_equipment', {})
             photo_path = eq_data.pop('_photo_path', None)
             blocks = eq_data.pop('blocks', [])

@@ -1,16 +1,40 @@
 import os
 import json
 import re
+import copy
 from anthropic import Anthropic
 from database import search_equipment, get_all_equipment, get_equipment_by_model
 
 client = Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 
+NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
+SECTION_HEADERS = {
+    'технические характеристики': 'specs',
+    'гарантия': 'warranty_block',
+    'конструктивное исполнение': 'construction',
+    'расход рабочей жидкости': 'flow',
+    'габаритные размеры': 'dimensions',
+    'габаритный чертеж': 'drawing',
+    'назначение': 'purpose',
+    'конструкция насоса': 'design',
+    'комплект поставки': 'supply',
+    'дополнительные опции': 'options',
+    'график рабочих характеристик': 'chart',
+    'наименование': 'naming',
+    'назначение оборудования': 'purpose',
+}
+
+CONDITIONS_KEYWORDS = [
+    'сроки изготовления', 'сроки поставки', 'срок изготовления', 'срок поставки',
+    'упаковка', 'условия оплаты', 'цена с ндс', 'цена за',
+    'с уважением', 'директор', 'коммерческое предложение',
+    'ооо «фарсал» предлагает', 'гарантийный срок', 'изнашиваемые детали'
+]
+
 SYSTEM_PROMPT = """Ты — ИИ-агент компании ООО «Фарсал», помогающий менеджерам создавать коммерческие предложения.
 
 Компания продаёт промышленное оборудование — насосы и компрессоры производства Китай.
-
-Твоя задача — вести диалог с менеджером, собрать все необходимые данные для КП и вернуть их в структурированном виде.
 
 ОБЯЗАТЕЛЬНЫЕ данные для КП:
 - Оборудование (одна или несколько позиций): название, модель
@@ -18,21 +42,18 @@ SYSTEM_PROMPT = """Ты — ИИ-агент компании ООО «Фарса
 - Цена за единицу (и валюта)
 - Клиент (название организации)
 
-НЕОБЯЗАТЕЛЬНЫЕ (если не указаны — берём из библиотеки или стандартные):
+НЕОБЯЗАТЕЛЬНЫЕ (если не указаны — берём из библиотеки):
 - Условия оплаты
 - Срок поставки/изготовления
 - Способ доставки
 - Гарантия
-- Контактное лицо клиента
 
 ПРАВИЛА:
-1. Задавай уточняющие вопросы по одному — не анкетой
-2. Если менеджер назвал модель — используй её
-3. Если данных достаточно — верни JSON
-4. Веди деловой но дружелюбный тон
-5. Понимай разговорный стиль ("сделай подешевле" = изменить цену)
-6. "готово", "сохрани", "отправляй" — сигнал финализировать КП
-7. Поддерживай несколько позиций в одном КП
+1. Задавай уточняющие вопросы по одному
+2. Если данных достаточно — верни JSON
+3. Понимай разговорный стиль
+4. "готово", "сохрани", "отправляй" — финализировать КП
+5. Поддерживай несколько позиций
 
 Когда все данные собраны, верни ТОЛЬКО JSON:
 ```json
@@ -58,9 +79,7 @@ SYSTEM_PROMPT = """Ты — ИИ-агент компании ООО «Фарса
   "notes": null
 }
 ```
-
-Если для позиции не указаны условия — оставь null (возьмём из библиотеки).
-Если данных не хватает — веди диалог без JSON.
+null = возьмём из библиотеки.
 """
 
 
@@ -69,13 +88,13 @@ def parse_json_from_text(text: str) -> dict | None:
     if json_match:
         try:
             return json.loads(json_match.group(1))
-        except json.JSONDecodeError:
+        except:
             pass
     try:
         json_match = re.search(r'\{.*\}', text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group())
-    except Exception:
+    except:
         pass
     return None
 
@@ -97,90 +116,170 @@ def chat_with_claude(conversation_history: list, user_message: str) -> tuple[str
     )
     assistant_message = response.content[0].text
     conversation_history.append({"role": "assistant", "content": assistant_message})
-    text, kp_data = parse_claude_response(assistant_message)
-    return assistant_message, kp_data
+    return parse_claude_response(assistant_message)
 
 
 def process_edit(conversation_history: list, edit_message: str) -> tuple[str, dict | None]:
-    edit_prompt = f"""Менеджер хочет внести правку в КП: {edit_message}
-Обнови данные КП и верни обновлённый JSON. Если правка понятна — сразу верни JSON."""
+    edit_prompt = f"Менеджер хочет внести правку: {edit_message}\nОбнови JSON КП."
     return chat_with_claude(conversation_history, edit_prompt)
 
 
-def extract_blocks_from_doc(doc_text: str, doc_path: str = None) -> tuple[dict, list]:
+# ─── Извлечение блоков из Word файла ─────────────────────────────────────────
+
+def _get_elem_text(elem) -> str:
+    return ''.join(t.text or '' for t in elem.iter(f'{{{NS}}}t')).strip()
+
+
+def _is_section_header(elem) -> tuple:
+    if elem.tag.split('}')[-1] != 'p':
+        return None, None
+    style_elems = list(elem.iter(f'{{{NS}}}pStyle'))
+    style = style_elems[0].get(f'{{{NS}}}val', '') if style_elems else ''
+    text = _get_elem_text(elem).lower()
+    if not text:
+        return None, None
+    is_header_style = bool(re.search(r'[Hh]eading|ХХХ|^\d+$', style))
+    if is_header_style:
+        for keyword, block_type in SECTION_HEADERS.items():
+            if keyword in text:
+                return block_type, _get_elem_text(elem)
+    for keyword, block_type in SECTION_HEADERS.items():
+        if text == keyword or text.startswith(keyword):
+            return block_type, _get_elem_text(elem)
+    return None, None
+
+
+def _is_conditions_element(elem) -> bool:
+    text = _get_elem_text(elem).lower()
+    return any(kw in text for kw in CONDITIONS_KEYWORDS)
+
+
+def extract_blocks_from_docx(doc_path: str) -> list:
     """
-    Извлекает данные оборудования и блоки из КП документа.
-    Возвращает (карточка оборудования, список блоков)
+    Извлекает блоки из Word файла как XML фрагменты.
+    Сохраняет всё форматирование — таблицы, шрифты, стили.
     """
-    prompt = f"""Из текста коммерческого предложения извлеки:
-1. Данные об оборудовании
-2. Все разделы документа как отдельные блоки
+    try:
+        from docx import Document
+        from lxml import etree
+    except ImportError:
+        return []
+
+    doc = Document(doc_path)
+    body = doc.element.body
+    elements = list(body)
+
+    blocks = []
+    current_block = None
+    current_elements = []
+
+    for elem in elements:
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        if tag == 'sectPr':
+            continue
+
+        block_type, block_title = _is_section_header(elem)
+
+        if block_type:
+            # Сохраняем предыдущий блок
+            if current_block and current_elements:
+                from lxml import etree as et
+                wrapper = et.Element('block')
+                for e in current_elements:
+                    wrapper.append(copy.deepcopy(e))
+                blocks.append({
+                    'type': current_block['type'],
+                    'title': current_block['title'],
+                    'xml': et.tostring(wrapper, encoding='unicode'),
+                    'images': []
+                })
+            current_block = {'type': block_type, 'title': block_title}
+            current_elements = []
+
+        elif current_block:
+            if _is_conditions_element(elem):
+                # Конец блоков — начались условия
+                if current_elements:
+                    from lxml import etree as et
+                    wrapper = et.Element('block')
+                    for e in current_elements:
+                        wrapper.append(copy.deepcopy(e))
+                    blocks.append({
+                        'type': current_block['type'],
+                        'title': current_block['title'],
+                        'xml': et.tostring(wrapper, encoding='unicode'),
+                        'images': []
+                    })
+                current_block = None
+                current_elements = []
+            else:
+                text = _get_elem_text(elem)
+                if text or tag == 'tbl':
+                    current_elements.append(elem)
+
+    # Последний блок
+    if current_block and current_elements:
+        from lxml import etree as et
+        wrapper = et.Element('block')
+        for e in current_elements:
+            wrapper.append(copy.deepcopy(e))
+        blocks.append({
+            'type': current_block['type'],
+            'title': current_block['title'],
+            'xml': et.tostring(wrapper, encoding='unicode'),
+            'images': []
+        })
+
+    return blocks
+
+
+def extract_equipment_info_from_text(doc_text: str) -> dict:
+    """Извлекает данные об оборудовании через Claude"""
+    prompt = f"""Из текста КП извлеки данные оборудования.
 
 Текст:
-{doc_text}
+{doc_text[:3000]}
 
 Верни JSON:
 ```json
 {{
-  "equipment": {{
-    "name": "полное название",
-    "model": "модель/артикул",
-    "description": "краткое описание или null",
-    "warranty": "гарантийные условия",
-    "production_time": "срок изготовления/поставки",
-    "packaging": "упаковка",
-    "delivery": "место доставки",
-    "payment_terms": "условия оплаты",
-    "base_price": числовое значение или null,
-    "currency": "валюта"
-  }},
-  "blocks": [
-    {{
-      "type": "specs",
-      "title": "Технические характеристики",
-      "content": "текстовое содержимое раздела"
-    }},
-    {{
-      "type": "construction",
-      "title": "Конструктивное исполнение",
-      "content": "текстовое содержимое"
-    }}
-  ]
+  "name": "полное название",
+  "model": "модель",
+  "warranty": "гарантия",
+  "production_time": "срок",
+  "packaging": "упаковка",
+  "delivery": "место доставки",
+  "payment_terms": "условия оплаты",
+  "base_price": числовое значение или null,
+  "currency": "валюта"
 }}
-```
-
-Типы блоков: specs, construction, dimensions, flow, warranty_block, delivery_info, options, purpose, design, supply_set, chart, other
-Если раздела нет — не включай его в список.
-"""
+```"""
 
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=4000,
+        max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
-
-    text = response.content[0].text
-    data = parse_json_from_text(text)
-
-    if not data:
-        return {}, []
-
-    equipment = data.get('equipment', {})
-    blocks = data.get('blocks', [])
-    return equipment, blocks
+    return parse_json_from_text(response.content[0].text) or {}
 
 
-def extract_all_equipment_from_doc(doc_text: str) -> list:
-    """Извлекает все позиции оборудования из КП (для обратной совместимости)"""
-    equipment, blocks = extract_blocks_from_doc(doc_text)
-    if equipment:
-        equipment['blocks'] = blocks
-        return [equipment]
-    return []
+def extract_all_equipment_from_doc(doc_text: str, doc_path: str = None) -> list:
+    """Извлекает оборудование из документа. doc_path нужен для извлечения XML блоков."""
+    # Данные оборудования через Claude
+    equipment = extract_equipment_info_from_text(doc_text)
+    if not equipment:
+        return []
+
+    # Блоки через XML если есть путь к файлу
+    blocks = []
+    if doc_path and os.path.exists(doc_path):
+        blocks = extract_blocks_from_docx(doc_path)
+
+    equipment['blocks'] = blocks
+    return [equipment]
 
 
 def extract_equipment_from_doc(doc_text: str) -> dict:
-    """Извлекает первую позицию (для обратной совместимости)"""
     items = extract_all_equipment_from_doc(doc_text)
     return items[0] if items else {}
 
@@ -193,7 +292,6 @@ def compare_equipment(existing: dict, new_data: dict) -> dict:
         'has_changes': False
     }
 
-    # Сравниваем цену
     old_price = existing.get('base_price')
     new_price = new_data.get('base_price')
     if old_price and new_price and abs(float(old_price) - float(new_price)) > 0.01:
@@ -203,56 +301,28 @@ def compare_equipment(existing: dict, new_data: dict) -> dict:
         }
         differences['has_changes'] = True
 
-    # Сравниваем условия
-    condition_fields = ['warranty', 'production_time', 'packaging', 'delivery', 'payment_terms']
-    for field in condition_fields:
+    for field in ['warranty', 'production_time', 'packaging', 'delivery', 'payment_terms']:
         old_val = existing.get(field, '')
         new_val = new_data.get(field, '')
         if old_val and new_val and str(old_val).strip() != str(new_val).strip():
-            differences['conditions_changed'].append({
-                'field': field, 'old': old_val, 'new': new_val
-            })
+            differences['conditions_changed'].append(
+                {'field': field, 'old': old_val, 'new': new_val}
+            )
             differences['has_changes'] = True
-
-    # Сравниваем характеристики
-    try:
-        old_specs = json.loads(existing.get('specs', '[]')) if isinstance(existing.get('specs'), str) else (existing.get('specs') or [])
-        new_specs = new_data.get('specs', [])
-        old_dict = {s['name']: s['value'] for s in old_specs}
-        new_dict = {s['name']: s['value'] for s in new_specs}
-        for name, new_val in new_dict.items():
-            old_val = old_dict.get(name)
-            if old_val is None:
-                differences['specs_changed'].append({'name': name, 'old': None, 'new': new_val, 'type': 'added'})
-                differences['has_changes'] = True
-            elif str(old_val) != str(new_val):
-                differences['specs_changed'].append({'name': name, 'old': old_val, 'new': new_val, 'type': 'changed'})
-                differences['has_changes'] = True
-        for name in old_dict:
-            if name not in new_dict:
-                differences['specs_changed'].append({'name': name, 'old': old_dict[name], 'new': None, 'type': 'removed'})
-                differences['has_changes'] = True
-    except Exception as e:
-        print(f"Ошибка сравнения характеристик: {e}")
 
     return differences
 
 
 def resolve_equipment_conflict(existing: dict, new_data: dict, differences: dict, manager_instruction: str) -> dict:
     prompt = f"""Менеджер решает конфликт данных оборудования.
-
-Существующие данные: {json.dumps(existing, ensure_ascii=False, indent=2)}
-Новые данные: {json.dumps(new_data, ensure_ascii=False, indent=2)}
-Различия: {json.dumps(differences, ensure_ascii=False, indent=2)}
-Инструкция менеджера: {manager_instruction}
-
-Составь итоговые данные оборудования на основе инструкции.
+Существующие: {json.dumps(existing, ensure_ascii=False)}
+Новые: {json.dumps(new_data, ensure_ascii=False)}
+Различия: {json.dumps(differences, ensure_ascii=False)}
+Инструкция: {manager_instruction}
 Верни ТОЛЬКО JSON с итоговыми данными."""
-
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
-    result = parse_json_from_text(response.content[0].text)
-    return result or new_data
+    return parse_json_from_text(response.content[0].text) or new_data

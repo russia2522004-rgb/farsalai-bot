@@ -1,10 +1,9 @@
 import os
 import json
-import zipfile
-import shutil
+import copy
 from datetime import datetime
 from docx import Document
-from docx.shared import Pt, Cm, Inches
+from docx.shared import Pt, Cm, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
@@ -12,6 +11,7 @@ from database import get_equipment_by_model, get_equipment_blocks
 
 OUTPUT_DIR = 'output'
 TEMPLATE_PATH = 'template/kp_template.docx'
+NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs('template', exist_ok=True)
@@ -21,7 +21,7 @@ def _replace_text_in_runs(paragraph, placeholder, value):
     full_text = ''.join([run.text for run in paragraph.runs])
     if placeholder not in full_text:
         return False
-    new_full = full_text.replace(placeholder, value)
+    new_full = full_text.replace(placeholder, str(value) if value else '')
     if paragraph.runs:
         paragraph.runs[0].text = new_full
         for run in paragraph.runs[1:]:
@@ -31,65 +31,127 @@ def _replace_text_in_runs(paragraph, placeholder, value):
 
 def _replace_in_document(doc, replacements: dict):
     for paragraph in doc.paragraphs:
-        for placeholder, value in replacements.items():
-            _replace_text_in_runs(paragraph, placeholder, str(value) if value else '')
+        for k, v in replacements.items():
+            _replace_text_in_runs(paragraph, k, v)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
-                    for placeholder, value in replacements.items():
-                        _replace_text_in_runs(paragraph, placeholder, str(value) if value else '')
+                    for k, v in replacements.items():
+                        _replace_text_in_runs(paragraph, k, v)
 
 
-def _find_placeholder_paragraph(doc, placeholder: str):
-    """Находит параграф с плейсхолдером"""
-    for i, para in enumerate(doc.paragraphs):
-        if placeholder in ''.join([r.text for r in para.runs]):
-            return i, para
-    return None, None
+def _find_content_placeholder(doc):
+    """Находит параграф с {{CONTENT}}"""
+    for para in doc.paragraphs:
+        if '{{CONTENT}}' in ''.join(r.text for r in para.runs):
+            return para
+    return None
 
 
-def _add_paragraph_after(doc, ref_para, text, bold=False, size=11):
-    """Добавляет параграф после указанного"""
-    new_para = OxmlElement('w:p')
-    ref_para._element.addnext(new_para)
-    from docx.oxml import OxmlElement
-    # Проще создать через docx и потом переместить
+def _add_equipment_header(doc, insert_after_elem, name: str):
+    """Добавляет заголовок оборудования в чёрной рамке"""
+    from lxml import etree
+
+    # Создаём параграф с чёрным фоном как в оригинале
     p = doc.add_paragraph()
-    run = p.add_run(text)
-    run.bold = bold
-    run.font.size = Pt(size)
-    # Перемещаем в нужное место
-    ref_para._element.addnext(p._element)
-    return p
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Форматирование параграфа — чёрный фон
+    pPr = p._element.get_or_add_pPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), '000000')  # чёрный фон
+    pPr.append(shd)
+
+    # Текст белый жирный
+    run = p.add_run(name)
+    run.bold = True
+    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)  # белый
+    run.font.size = Pt(14)
+    run.font.name = 'Arial'
+
+    insert_after_elem.addnext(p._element)
+    return p._element
 
 
-def _add_specs_table(doc, ref_para, specs: list):
-    """Добавляет таблицу характеристик после параграфа"""
-    if not specs:
-        return
+def _insert_xml_block(doc, insert_after_elem, xml_content: str):
+    """Вставляет XML блок после указанного элемента"""
+    try:
+        from lxml import etree
+        block = etree.fromstring(xml_content)
 
-    table = doc.add_table(rows=1, cols=2)
-    table.style = 'Table Grid'
-    hdr = table.rows[0].cells
-    hdr[0].text = 'Характеристика'
-    hdr[1].text = 'Значение'
-    for cell in hdr:
-        for para in cell.paragraphs:
-            for run in para.runs:
-                run.bold = True
+        # Вставляем дочерние элементы в обратном порядке
+        children = list(block)
+        for child in reversed(children):
+            child_copy = copy.deepcopy(child)
+            insert_after_elem.addnext(child_copy)
 
-    for spec in specs:
-        row = table.add_row().cells
-        row[0].text = spec.get('name', '')
-        p = row[1].paragraphs[0]
-        run = p.add_run(str(spec.get('value', '')))
-        run.bold = True
-
-    ref_para._element.addnext(table._tbl)
+        return True
+    except Exception as e:
+        print(f"Ошибка вставки XML блока: {e}")
+        return False
 
 
-def _add_summary_table(doc, ref_para, items: list):
+def _add_section_title(doc, insert_after_elem, title: str):
+    """Добавляет заголовок раздела"""
+    p = doc.add_paragraph()
+    run = p.add_run(title)
+    run.bold = True
+    run.font.size = Pt(11)
+    run.font.name = 'Arial'
+    insert_after_elem.addnext(p._element)
+    return p._element
+
+
+def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
+    """Добавляет блок условий для позиции"""
+    warranty = item.get('warranty') or (eq.get('warranty') if eq else None) or '1 год. Изнашиваемые детали гарантийному обслуживанию не подлежат.'
+    production_time = item.get('production_time') or (eq.get('production_time') if eq else None) or '25-30 дней'
+    packaging = item.get('packaging') or (eq.get('packaging') if eq else None) or 'экспортная деревянная тара (ящик)'
+    delivery = item.get('delivery') or (eq.get('delivery') if eq else None) or 'до завода покупателя'
+    payment_terms = item.get('payment_terms') or (eq.get('payment_terms') if eq else None) or '50% – предоплата, 50% – по факту поставки'
+    unit_price = item.get('unit_price', 0)
+    currency = item.get('currency', 'ЮАНЕЙ')
+
+    conditions = [
+        ('Цена с НДС с доставкой ' + delivery + ' за 1 штуку:', f'{unit_price:,.0f} {currency}.'),
+        ('Условия оплаты:', payment_terms + '.'),
+        ('Упаковка:', packaging + '.'),
+        ('Сроки изготовления:', production_time + '.'),
+    ]
+
+    # Добавляем снизу вверх (каждый addnext вставляет сразу после insert_after_elem)
+    for label, value in conditions:
+        p = doc.add_paragraph()
+        run_label = p.add_run(label + ' ')
+        run_label.bold = True
+        run_label.font.size = Pt(10)
+        run_label.font.name = 'Arial'
+        run_value = p.add_run(value)
+        run_value.font.size = Pt(10)
+        run_value.font.name = 'Arial'
+        insert_after_elem.addnext(p._element)
+
+    # Гарантия
+    gp = doc.add_paragraph()
+    gr = gp.add_run(warranty)
+    gr.font.size = Pt(10)
+    gr.font.name = 'Arial'
+    insert_after_elem.addnext(gp._element)
+
+    gt = doc.add_paragraph()
+    gtr = gt.add_run('Гарантия')
+    gtr.bold = True
+    gtr.font.size = Pt(11)
+    gtr.font.name = 'Arial'
+    insert_after_elem.addnext(gt._element)
+
+    return insert_after_elem
+
+
+def _add_summary_table(doc, insert_after_elem, items: list):
     """Добавляет итоговую таблицу для нескольких позиций"""
     table = doc.add_table(rows=1, cols=4)
     table.style = 'Table Grid'
@@ -100,34 +162,63 @@ def _add_summary_table(doc, ref_para, items: list):
         for para in cell.paragraphs:
             for run in para.runs:
                 run.bold = True
+                run.font.name = 'Arial'
 
     total = 0
+    currency = ''
     for item in items:
         row = table.add_row().cells
         row[0].text = item.get('name', item.get('model', ''))
-        row[1].text = str(item.get('quantity', 1))
-        price = item.get('unit_price', 0)
-        currency = item.get('currency', '')
         qty = item.get('quantity', 1)
+        price = item.get('unit_price', 0)
+        currency = item.get('currency', 'ЮАНЕЙ')
         subtotal = price * qty
         total += subtotal
+        row[1].text = str(qty)
         row[2].text = f"{price:,.0f} {currency}"
         row[3].text = f"{subtotal:,.0f} {currency}"
+        for cell in row:
+            for para in cell.paragraphs:
+                for run in para.runs:
+                    run.font.name = 'Arial'
 
-    # Итоговая строка
     total_row = table.add_row().cells
     total_row[0].text = 'ИТОГО'
+    total_row[3].text = f"{total:,.0f} {currency}"
     for cell in total_row:
         for para in cell.paragraphs:
             for run in para.runs:
                 run.bold = True
-    currency = items[0].get('currency', '') if items else ''
-    total_row[3].text = f"{total:,.0f} {currency}"
-    for para in total_row[3].paragraphs:
-        for run in para.runs:
-            run.bold = True
+                run.font.name = 'Arial'
 
-    ref_para._element.addnext(table._tbl)
+    insert_after_elem.addnext(table._tbl)
+
+    title_p = doc.add_paragraph()
+    title_r = title_p.add_run('Итоговая стоимость')
+    title_r.bold = True
+    title_r.font.size = Pt(11)
+    title_r.font.name = 'Arial'
+    insert_after_elem.addnext(title_p._element)
+
+
+def _download_photo(photo_path: str, local_path: str) -> bool:
+    """Скачивает фото с Яндекс Диска"""
+    try:
+        import requests
+        token = os.getenv('YANDEX_DISK_TOKEN')
+        headers = {'Authorization': f'OAuth {token}'}
+        r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/download',
+                         headers=headers, params={'path': photo_path})
+        if r.status_code == 200:
+            download_url = r.json().get('href')
+            if download_url:
+                img_r = requests.get(download_url)
+                with open(local_path, 'wb') as f:
+                    f.write(img_r.content)
+                return True
+    except Exception as e:
+        print(f"Ошибка скачивания фото: {e}")
+    return False
 
 
 def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
@@ -147,173 +238,85 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
         '{{KP_NUMBER}}': kp_number,
     })
 
-    # Находим плейсхолдер {{CONTENT}}
-    content_idx, content_para = _find_placeholder_paragraph(doc, '{{CONTENT}}')
-
+    # Находим {{CONTENT}}
+    content_para = _find_content_placeholder(doc)
     if content_para is None:
-        # Если нет {{CONTENT}} — добавляем в конец перед подписью
-        content_para = doc.paragraphs[-3] if len(doc.paragraphs) > 3 else doc.paragraphs[-1]
+        raise ValueError("Плейсхолдер {{CONTENT}} не найден в шаблоне")
 
     # Очищаем плейсхолдер
-    content_para.runs[0].text = '' if content_para.runs else ''
+    for run in content_para.runs:
+        run.text = ''
 
-    # Вставляем блоки оборудования в обратном порядке (addnext вставляет после)
-    insert_after = content_para
+    insert_after = content_para._element
 
-    # Если несколько позиций — добавляем итоговую таблицу последней
+    # Итоговая таблица (если несколько позиций) — добавляем последней
     if len(items) > 1:
-        summary_title = doc.add_paragraph()
-        run = summary_title.add_run('Итоговая стоимость')
-        run.bold = True
-        run.font.size = Pt(11)
-        insert_after._element.addnext(summary_title._element)
-        _add_summary_table(doc, summary_title, items)
-        insert_after = summary_title
+        _add_summary_table(doc, insert_after, items)
 
-    # Добавляем блоки каждой позиции (в обратном порядке чтобы получить правильный порядок)
+    # Обрабатываем позиции в обратном порядке
     for item in reversed(items):
         model = item.get('model', '')
         eq = get_equipment_by_model(model)
         blocks = get_equipment_blocks(eq['id']) if eq else []
 
-        # Условия для этой позиции
-        warranty = item.get('warranty') or (eq.get('warranty') if eq else None) or '1 год.'
-        production_time = item.get('production_time') or (eq.get('production_time') if eq else None) or '25-30 дней'
-        packaging = item.get('packaging') or (eq.get('packaging') if eq else None) or 'экспортная деревянная тара (ящик)'
-        delivery = item.get('delivery') or (eq.get('delivery') if eq else None) or 'до завода покупателя'
-        payment_terms = item.get('payment_terms') or kp_data.get('payment_terms') or (eq.get('payment_terms') if eq else None) or '50% предоплата, 50% по факту поставки'
-        unit_price = item.get('unit_price', 0)
-        currency = item.get('currency', kp_data.get('currency', 'ЮАНЕЙ'))
+        # Условия позиции
+        _add_conditions_block(doc, insert_after, item, eq)
 
-        # Блок условий позиции
-        conditions_para = doc.add_paragraph()
-        insert_after._element.addnext(conditions_para._element)
-
-        def add_condition(text, bold_label):
-            p = doc.add_paragraph()
-            run_label = p.add_run(f'{bold_label} ')
-            run_label.bold = True
-            run_label.font.size = Pt(10)
-            run_value = p.add_run(text)
-            run_value.font.size = Pt(10)
-            conditions_para._element.addnext(p._element)
-            return p
-
-        # Добавляем условия снизу вверх
-        add_condition(f"{unit_price:,.0f} {currency}.",
-                      'Цена с НДС с доставкой до завода покупателя за 1 штуку:')
-        add_condition(payment_terms + '.', 'Условия оплаты:')
-        add_condition(packaging + '.', 'Упаковка:')
-        add_condition(production_time + '.', 'Сроки изготовления:')
-
-        warranty_para = doc.add_paragraph()
-        conditions_para._element.addnext(warranty_para._element)
-        run_w = warranty_para.add_run('Гарантия')
-        run_w.bold = True
-        run_w.font.size = Pt(11)
-
-        warranty_text = doc.add_paragraph()
-        conditions_para._element.addnext(warranty_text._element)
-        run_wt = warranty_text.add_run(warranty)
-        run_wt.font.size = Pt(10)
-
-        # Добавляем блоки из библиотеки (в обратном порядке)
+        # Блоки из библиотеки (в обратном порядке)
         for block in reversed(blocks):
             block_title = block.get('block_title', '')
-            xml_content = block.get('xml', block.get('xml_content', ''))
+            xml_content = block.get('xml_content', '') or block.get('xml', '')
 
-            if block_title:
-                title_para = doc.add_paragraph()
-                title_run = title_para.add_run(block_title)
-                title_run.bold = True
-                title_run.font.size = Pt(11)
-                conditions_para._element.addnext(title_para._element)
-
-            # Если есть XML — вставляем как есть (сохраняет форматирование)
             if xml_content:
-                try:
-                    from lxml import etree
-                    xml_elem = etree.fromstring(xml_content)
-                    conditions_para._element.addnext(xml_elem)
-                except Exception:
-                    # Fallback — добавляем как текст
-                    if block.get('content'):
-                        content_p = doc.add_paragraph(block.get('content', ''))
-                        content_p.runs[0].font.size = Pt(10) if content_p.runs else None
-                        conditions_para._element.addnext(content_p._element)
-
-        # Если нет блоков из библиотеки — добавляем характеристики из specs
-        if not blocks and eq and eq.get('specs'):
-            try:
-                specs = json.loads(eq['specs']) if isinstance(eq['specs'], str) else eq['specs']
-                if specs:
-                    specs_title = doc.add_paragraph()
-                    run_st = specs_title.add_run('Технические характеристики')
-                    run_st.bold = True
-                    run_st.font.size = Pt(11)
-                    conditions_para._element.addnext(specs_title._element)
-                    _add_specs_table(doc, specs_title, specs)
-            except Exception as e:
-                print(f"Ошибка добавления характеристик: {e}")
+                _insert_xml_block(doc, insert_after, xml_content)
+            
+            if block_title:
+                _add_section_title(doc, insert_after, block_title)
 
         # Фото оборудования
         if eq and eq.get('photo_path'):
             photo_local = f'temp_photo_{kp_number}_{model}.jpg'
-            try:
-                import requests
-                token = os.getenv('YANDEX_DISK_TOKEN')
-                headers = {'Authorization': f'OAuth {token}'}
-                r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/download',
-                                 headers=headers,
-                                 params={'path': eq['photo_path']})
-                if r.status_code == 200:
-                    download_url = r.json().get('href')
-                    if download_url:
-                        img_r = requests.get(download_url)
-                        with open(photo_local, 'wb') as f:
-                            f.write(img_r.content)
+            if _download_photo(eq['photo_path'], photo_local):
+                try:
+                    photo_p = doc.add_paragraph()
+                    photo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run_photo = photo_p.add_run()
+                    run_photo.add_picture(photo_local, width=Inches(4))
+                    insert_after.addnext(photo_p._element)
 
-                        photo_para = doc.add_paragraph()
-                        photo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        run_photo = photo_para.add_run()
-                        run_photo.add_picture(photo_local, width=Inches(4))
-                        note_para = doc.add_paragraph(
-                            '* Фото для справки, реальные фотографии будут предоставлены после завершения производства.')
-                        if note_para.runs:
-                            note_para.runs[0].font.size = Pt(9)
-                            note_para.runs[0].italic = True
-                        conditions_para._element.addnext(note_para._element)
-                        conditions_para._element.addnext(photo_para._element)
-            except Exception as e:
-                print(f"Ошибка загрузки фото: {e}")
-            finally:
-                if os.path.exists(photo_local):
-                    os.remove(photo_local)
+                    note_p = doc.add_paragraph()
+                    note_r = note_p.add_run(
+                        '* Фото для справки. Реальные фотографии будут предоставлены после завершения производства.')
+                    note_r.font.size = Pt(9)
+                    note_r.italic = True
+                    note_r.font.name = 'Arial'
+                    insert_after.addnext(note_p._element)
+                except Exception as e:
+                    print(f"Ошибка вставки фото: {e}")
+                finally:
+                    if os.path.exists(photo_local):
+                        os.remove(photo_local)
 
-        # Название оборудования
+        # Заголовок оборудования (чёрная рамка)
         name = eq['name'] if eq else item.get('name', model)
-        name_para = doc.add_paragraph()
-        run_name = name_para.add_run(name)
-        run_name.bold = True
-        run_name.font.size = Pt(13)
-        name_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        conditions_para._element.addnext(name_para._element)
+        _add_equipment_header(doc, insert_after, name)
 
         # Разделитель между позициями
         if len(items) > 1:
             sep = doc.add_paragraph()
-            conditions_para._element.addnext(sep._element)
+            insert_after.addnext(sep._element)
 
-    # Сохраняем
+    # Сохраняем Word
     docx_path = os.path.join(OUTPUT_DIR, f'КП_{kp_number}.docx')
     doc.save(docx_path)
 
-    pdf_path = _convert_to_pdf_reportlab(kp_data, kp_number)
+    # Генерируем PDF
+    pdf_path = _convert_to_pdf(kp_data, kp_number)
 
     return docx_path, pdf_path
 
 
-def _convert_to_pdf_reportlab(kp_data: dict, kp_number: str) -> str:
+def _convert_to_pdf(kp_data: dict, kp_number: str) -> str:
     """Генерирует PDF через reportlab"""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
@@ -325,7 +328,6 @@ def _convert_to_pdf_reportlab(kp_data: dict, kp_number: str) -> str:
 
     pdf_path = os.path.join(OUTPUT_DIR, f'КП_{kp_number}.pdf')
 
-    # Шрифт
     font_name, font_bold = 'Helvetica', 'Helvetica-Bold'
     for regular, bold in [
         ('fonts/DejaVuSans.ttf', 'fonts/DejaVuSans-Bold.ttf'),
@@ -341,93 +343,93 @@ def _convert_to_pdf_reportlab(kp_data: dict, kp_number: str) -> str:
             except Exception:
                 pass
 
-    doc = SimpleDocTemplate(pdf_path, pagesize=A4,
-                            leftMargin=2*cm, rightMargin=1.5*cm,
-                            topMargin=2*cm, bottomMargin=2*cm)
+    pdf_doc = SimpleDocTemplate(pdf_path, pagesize=A4,
+                                leftMargin=2*cm, rightMargin=1.5*cm,
+                                topMargin=2*cm, bottomMargin=2*cm)
 
-    normal = ParagraphStyle('n', fontName=font_name, fontSize=10, leading=14)
-    bold_s = ParagraphStyle('b', fontName=font_bold, fontSize=10, leading=14)
-    title_s = ParagraphStyle('t', fontName=font_bold, fontSize=14, leading=18, alignment=1)
-    sub_s = ParagraphStyle('s', fontName=font_bold, fontSize=12, leading=16, alignment=1)
-    right_s = ParagraphStyle('r', fontName=font_name, fontSize=10, leading=14, alignment=2)
+    n = ParagraphStyle('n', fontName=font_name, fontSize=10, leading=14)
+    b = ParagraphStyle('b', fontName=font_bold, fontSize=10, leading=14)
+    t = ParagraphStyle('t', fontName=font_bold, fontSize=14, leading=18, alignment=1)
+    s = ParagraphStyle('s', fontName=font_bold, fontSize=12, leading=16,
+                       backColor=colors.black, textColor=colors.white, alignment=1)
+    r = ParagraphStyle('r', fontName=font_name, fontSize=10, leading=14, alignment=2)
 
     story = []
     kp_date = kp_data.get('kp_date', datetime.now().strftime('%d.%m.%Y'))
     kp_num = kp_data.get('kp_number', kp_number)
     items = kp_data.get('items', [])
 
-    story.append(Paragraph(f'от {kp_date}    №    {kp_num}', right_s))
-    story.append(Paragraph('г. Таганрог', right_s))
+    story.append(Paragraph(f'от {kp_date}    №    {kp_num}', r))
+    story.append(Paragraph('г. Таганрог', r))
     story.append(Spacer(1, 0.5*cm))
-    story.append(Paragraph('КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ', title_s))
+    story.append(Paragraph('КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ', t))
     story.append(Spacer(1, 0.3*cm))
-    story.append(Paragraph('ООО «Фарсал» предлагает к поставке', sub_s))
-    story.append(Spacer(1, 0.5*cm))
+    story.append(Paragraph('ООО «Фарсал» предлагает к поставке', ParagraphStyle('sub', fontName=font_bold, fontSize=12, alignment=1)))
+    story.append(Spacer(1, 0.3*cm))
 
     for item in items:
         model = item.get('model', '')
         eq = get_equipment_by_model(model)
         name = eq['name'] if eq else item.get('name', model)
 
-        story.append(Paragraph(name, sub_s))
+        story.append(Paragraph(name, s))
         story.append(Spacer(1, 0.3*cm))
 
-        # Характеристики
+        # Характеристики из БД
         if eq and eq.get('specs'):
             try:
                 specs = json.loads(eq['specs']) if isinstance(eq['specs'], str) else eq['specs']
                 if specs:
-                    story.append(Paragraph('Технические характеристики', bold_s))
+                    story.append(Paragraph('Технические характеристики', b))
                     story.append(Spacer(1, 0.2*cm))
                     td = [['Характеристика', 'Значение']]
-                    for s in specs:
-                        td.append([s.get('name', ''), str(s.get('value', ''))])
-                    t = Table(td, colWidths=[9*cm, 8*cm])
-                    t.setStyle(TableStyle([
+                    for sp in specs:
+                        td.append([sp.get('name', ''), str(sp.get('value', ''))])
+                    tbl = Table(td, colWidths=[9*cm, 8*cm])
+                    tbl.setStyle(TableStyle([
                         ('FONTNAME', (0, 0), (-1, 0), font_bold),
                         ('FONTNAME', (0, 1), (-1, -1), font_name),
-                        ('FONTNAME', (1, 1), (1, -1), font_bold),
                         ('FONTSIZE', (0, 0), (-1, -1), 9),
                         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
                         ('BACKGROUND', (0, 0), (-1, 0), colors.lightblue),
                     ]))
-                    story.append(t)
-                    story.append(Spacer(1, 0.5*cm))
+                    story.append(tbl)
+                    story.append(Spacer(1, 0.4*cm))
             except Exception:
                 pass
 
-        # Условия позиции
         warranty = item.get('warranty') or (eq.get('warranty') if eq else None) or '1 год.'
         production_time = item.get('production_time') or (eq.get('production_time') if eq else None) or '25-30 дней'
         packaging = item.get('packaging') or (eq.get('packaging') if eq else None) or 'экспортная деревянная тара (ящик)'
-        payment_terms = item.get('payment_terms') or kp_data.get('payment_terms') or (eq.get('payment_terms') if eq else None) or '50% предоплата, 50% по факту'
+        delivery = item.get('delivery') or (eq.get('delivery') if eq else None) or 'до завода покупателя'
+        payment_terms = item.get('payment_terms') or (eq.get('payment_terms') if eq else None) or '50% предоплата, 50% по факту'
         unit_price = item.get('unit_price', 0)
-        currency = item.get('currency', kp_data.get('currency', 'ЮАНЕЙ'))
+        currency = item.get('currency', 'ЮАНЕЙ')
 
-        story.append(Paragraph(f'Гарантия: {warranty}', normal))
-        story.append(Paragraph(f'Сроки изготовления: {production_time}.', normal))
-        story.append(Paragraph(f'Упаковка: {packaging}.', normal))
-        story.append(Paragraph(f'Условия оплаты: {payment_terms}.', normal))
-        story.append(Paragraph(f'Цена с НДС с доставкой {item.get("delivery", "до завода покупателя")} за 1 шт.: {unit_price:,.0f} {currency}.', bold_s))
+        story.append(Paragraph(f'Гарантия: {warranty}', n))
+        story.append(Paragraph(f'Сроки изготовления: {production_time}.', n))
+        story.append(Paragraph(f'Упаковка: {packaging}.', n))
+        story.append(Paragraph(f'Условия оплаты: {payment_terms}.', n))
+        story.append(Paragraph(f'Цена с НДС с доставкой {delivery} за 1 шт.: {unit_price:,.0f} {currency}.', b))
         story.append(Spacer(1, 0.5*cm))
 
     # Итоговая таблица
     if len(items) > 1:
-        story.append(Paragraph('Итоговая стоимость', bold_s))
+        story.append(Paragraph('Итоговая стоимость', b))
         td = [['Оборудование', 'Кол-во', 'Цена/шт', 'Сумма']]
         total = 0
+        curr = ''
         for item in items:
             qty = item.get('quantity', 1)
             price = item.get('unit_price', 0)
-            curr = item.get('currency', '')
+            curr = item.get('currency', 'ЮАНЕЙ')
             sub = price * qty
             total += sub
             td.append([item.get('name', item.get('model', '')), str(qty),
                        f"{price:,.0f} {curr}", f"{sub:,.0f} {curr}"])
-        curr = items[0].get('currency', '') if items else ''
         td.append(['ИТОГО', '', '', f"{total:,.0f} {curr}"])
-        t = Table(td, colWidths=[8*cm, 2*cm, 4*cm, 4*cm])
-        t.setStyle(TableStyle([
+        tbl = Table(td, colWidths=[8*cm, 2*cm, 4*cm, 4*cm])
+        tbl.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (-1, 0), font_bold),
             ('FONTNAME', (0, -1), (-1, -1), font_bold),
             ('FONTNAME', (0, 1), (-1, -2), font_name),
@@ -435,16 +437,16 @@ def _convert_to_pdf_reportlab(kp_data: dict, kp_number: str) -> str:
             ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightblue),
         ]))
-        story.append(t)
+        story.append(tbl)
         story.append(Spacer(1, 0.5*cm))
 
     story.append(Spacer(1, 1*cm))
-    story.append(Paragraph('С уважением,', normal))
-    story.append(Paragraph('директор ООО «Фарсал»,', normal))
+    story.append(Paragraph('С уважением,', n))
+    story.append(Paragraph('директор ООО «Фарсал»,', n))
     story.append(Spacer(1, 0.5*cm))
-    story.append(Paragraph('МП     _______________       А. Ю. Лавришко', normal))
+    story.append(Paragraph('МП     _______________       А. Ю. Лавришко', n))
 
-    doc.build(story)
+    pdf_doc.build(story)
     return pdf_path
 
 
