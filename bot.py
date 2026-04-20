@@ -17,7 +17,7 @@ from database import (
     init_db, add_equipment, get_all_equipment, search_equipment,
     get_equipment_by_model, delete_equipment, update_equipment,
     save_kp, update_kp, get_kp_by_number, search_kp, get_recent_kp,
-    generate_kp_number
+    generate_kp_number, save_equipment_blocks, get_equipment_blocks
 )
 from claude_agent import chat_with_claude, process_edit, extract_equipment_from_doc, extract_all_equipment_from_doc, compare_equipment, resolve_equipment_conflict
 from document_generator import generate_kp_document, cleanup_temp_files
@@ -574,13 +574,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Распределяем фото по позициям
-        # Если фото одно — привязываем к первой позиции
-        # Если несколько — по одному на каждую позицию
         for i, item in enumerate(items):
             if i < len(photos):
                 item['_photo_path'] = photos[i]
             elif photos:
-                item['_photo_path'] = photos[0]  # одно фото для всех
+                item['_photo_path'] = photos[0]
+
+            # Блоки уже внутри item['blocks'] если извлеклись
+            # Убеждаемся что поле есть
+            if 'blocks' not in item:
+                item['blocks'] = []
 
         # Сохраняем очередь для обработки
         session['equipment_queue'] = items
@@ -742,9 +745,10 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
     if action == 'new':
         # Новое оборудование
         if text in ['✅ Добавить']:
-            await update.message.reply_text('⏳ Сохраняю в библиотеку...')
             eq_data = session.get('pending_equipment', {})
             photo_path = eq_data.pop('_photo_path', None)
+            blocks = eq_data.pop('blocks', [])
+
             if isinstance(eq_data.get('specs'), list):
                 eq_data['specs'] = json.dumps(eq_data['specs'], ensure_ascii=False)
 
@@ -756,9 +760,18 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
                     os.remove(photo_path)
                     await update.message.reply_text('🖼 Фото загружено на Яндекс Диск')
                 except Exception as e:
-                    print(f"Ошибка загрузки фото: {e}")
+                    logger.error(f"Ошибка загрузки фото: {e}")
+                    await update.message.reply_text(f'⚠️ Фото не загружено: {str(e)}')
 
-            add_equipment(eq_data)
+            eq_id = add_equipment(eq_data)
+
+            # Сохраняем блоки
+            if blocks:
+                try:
+                    save_equipment_blocks(eq_id, blocks)
+                    await update.message.reply_text(f'📦 Сохранено блоков: {len(blocks)}')
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения блоков: {e}")
             await update.message.reply_text(f'✅ *{eq_data.get("name")}* добавлено!', parse_mode='Markdown')
             await send_log(context,
                 f"📚 <b>Добавлено оборудование</b>\n"
