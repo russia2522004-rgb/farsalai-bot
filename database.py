@@ -2,7 +2,6 @@ import os
 import json
 from datetime import datetime
 
-# Используем PostgreSQL если есть DATABASE_URL, иначе SQLite
 DATABASE_URL = os.getenv('DATABASE_URL')
 
 if DATABASE_URL:
@@ -19,12 +18,10 @@ else:
 
 
 def init_db():
-    """Инициализация базы данных"""
     conn = get_conn()
     c = conn.cursor()
 
     if DATABASE_URL:
-        # PostgreSQL
         c.execute('''
             CREATE TABLE IF NOT EXISTS equipment (
                 id SERIAL PRIMARY KEY,
@@ -32,13 +29,28 @@ def init_db():
                 model TEXT NOT NULL UNIQUE,
                 description TEXT,
                 specs TEXT,
-                construction TEXT,
-                extra_tables TEXT,
+                warranty TEXT DEFAULT '1 год. Изнашиваемые детали гарантийному обслуживанию не подлежат.',
                 production_time TEXT DEFAULT '25-30 дней',
                 packaging TEXT DEFAULT 'экспортная деревянная тара (ящик)',
+                delivery TEXT DEFAULT 'до завода покупателя',
+                payment_terms TEXT DEFAULT '50% – предоплата, 50% – по факту поставки',
                 base_price REAL,
                 currency TEXT DEFAULT 'ЮАНЕЙ',
                 photo_path TEXT,
+                original_file_path TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS equipment_blocks (
+                id SERIAL PRIMARY KEY,
+                equipment_id INTEGER REFERENCES equipment(id) ON DELETE CASCADE,
+                block_type TEXT NOT NULL,
+                block_title TEXT,
+                xml_content TEXT,
+                images TEXT DEFAULT '[]',
+                sort_order INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -57,15 +69,25 @@ def init_db():
                 manager_name TEXT,
                 yandex_word_url TEXT,
                 yandex_pdf_url TEXT,
-                yandex_word_id TEXT,
-                yandex_pdf_id TEXT,
                 sheets_row INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Добавляем новые колонки если их нет (миграция)
+        for col, definition in [
+            ('warranty', "TEXT DEFAULT '1 год.'"),
+            ('delivery', "TEXT DEFAULT 'до завода покупателя'"),
+            ('payment_terms', "TEXT DEFAULT '50% – предоплата, 50% – по факту поставки'"),
+            ('original_file_path', 'TEXT'),
+        ]:
+            try:
+                c.execute(f'ALTER TABLE equipment ADD COLUMN {col} {definition}')
+            except Exception:
+                pass
+
     else:
-        # SQLite
         c.execute('''
             CREATE TABLE IF NOT EXISTS equipment (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,13 +95,28 @@ def init_db():
                 model TEXT NOT NULL UNIQUE,
                 description TEXT,
                 specs TEXT,
-                construction TEXT,
-                extra_tables TEXT,
+                warranty TEXT DEFAULT '1 год. Изнашиваемые детали гарантийному обслуживанию не подлежат.',
                 production_time TEXT DEFAULT '25-30 дней',
                 packaging TEXT DEFAULT 'экспортная деревянная тара (ящик)',
+                delivery TEXT DEFAULT 'до завода покупателя',
+                payment_terms TEXT DEFAULT '50% – предоплата, 50% – по факту поставки',
                 base_price REAL,
                 currency TEXT DEFAULT 'ЮАНЕЙ',
                 photo_path TEXT,
+                original_file_path TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS equipment_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                equipment_id INTEGER REFERENCES equipment(id) ON DELETE CASCADE,
+                block_type TEXT NOT NULL,
+                block_title TEXT,
+                xml_content TEXT,
+                images TEXT DEFAULT '[]',
+                sort_order INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -98,8 +135,6 @@ def init_db():
                 manager_name TEXT,
                 yandex_word_url TEXT,
                 yandex_pdf_url TEXT,
-                yandex_word_id TEXT,
-                yandex_pdf_id TEXT,
                 sheets_row INTEGER,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -111,13 +146,14 @@ def init_db():
     print("База данных инициализирована")
 
 
+def _rows_to_dicts(cursor):
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+
 def _row_to_dict(cursor, row):
-    """Конвертирует строку в словарь"""
-    if DATABASE_URL:
-        return dict(row)
-    else:
-        cols = [d[0] for d in cursor.description]
-        return dict(zip(cols, row))
+    cols = [d[0] for d in cursor.description]
+    return dict(zip(cols, row)) if row else None
 
 
 # ─── Оборудование ────────────────────────────────────────────────────────────
@@ -125,41 +161,29 @@ def _row_to_dict(cursor, row):
 def add_equipment(data: dict) -> int:
     conn = get_conn()
     c = conn.cursor()
+    ph = PLACEHOLDER
+
+    fields = ['name', 'model', 'description', 'specs', 'warranty',
+              'production_time', 'packaging', 'delivery', 'payment_terms',
+              'base_price', 'currency', 'photo_path', 'original_file_path']
+    values = [data.get(f) for f in fields]
 
     if DATABASE_URL:
-        c.execute('''
-            INSERT INTO equipment
-            (name, model, description, specs, construction, extra_tables,
-             production_time, packaging, base_price, currency, photo_path)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        placeholders = ', '.join([ph] * len(fields))
+        c.execute(f'''
+            INSERT INTO equipment ({', '.join(fields)})
+            VALUES ({placeholders})
             ON CONFLICT (model) DO UPDATE SET
-            name=EXCLUDED.name, description=EXCLUDED.description,
-            specs=EXCLUDED.specs, construction=EXCLUDED.construction,
-            base_price=EXCLUDED.base_price, currency=EXCLUDED.currency
+            {', '.join(f"{f}=EXCLUDED.{f}" for f in fields if f != 'model')}
             RETURNING id
-        ''', (
-            data.get('name'), data.get('model'), data.get('description'),
-            data.get('specs'), data.get('construction'), data.get('extra_tables'),
-            data.get('production_time', '25-30 дней'),
-            data.get('packaging', 'экспортная деревянная тара (ящик)'),
-            data.get('base_price'), data.get('currency', 'ЮАНЕЙ'),
-            data.get('photo_path'),
-        ))
+        ''', values)
         eq_id = c.fetchone()[0]
     else:
-        c.execute('''
-            INSERT OR REPLACE INTO equipment
-            (name, model, description, specs, construction, extra_tables,
-             production_time, packaging, base_price, currency, photo_path)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        ''', (
-            data.get('name'), data.get('model'), data.get('description'),
-            data.get('specs'), data.get('construction'), data.get('extra_tables'),
-            data.get('production_time', '25-30 дней'),
-            data.get('packaging', 'экспортная деревянная тара (ящик)'),
-            data.get('base_price'), data.get('currency', 'ЮАНЕЙ'),
-            data.get('photo_path'),
-        ))
+        placeholders = ', '.join([ph] * len(fields))
+        c.execute(f'''
+            INSERT OR REPLACE INTO equipment ({', '.join(fields)})
+            VALUES ({placeholders})
+        ''', values)
         eq_id = c.lastrowid
 
     conn.commit()
@@ -172,18 +196,10 @@ def get_equipment_by_model(model: str) -> dict | None:
     c = conn.cursor()
     if DATABASE_URL:
         c.execute('SELECT * FROM equipment WHERE model ILIKE %s', (f'%{model}%',))
-        row = c.fetchone()
-        if row:
-            cols = [d[0] for d in c.description]
-            result = dict(zip(cols, row))
-        else:
-            result = None
     else:
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
         c.execute('SELECT * FROM equipment WHERE model LIKE ?', (f'%{model}%',))
-        row = c.fetchone()
-        result = dict(row) if row else None
+    row = c.fetchone()
+    result = _row_to_dict(c, row)
     conn.close()
     return result
 
@@ -192,46 +208,29 @@ def search_equipment(query: str) -> list:
     conn = get_conn()
     c = conn.cursor()
     if DATABASE_URL:
-        c.execute('''
-            SELECT * FROM equipment
-            WHERE name ILIKE %s OR model ILIKE %s
-        ''', (f'%{query}%', f'%{query}%'))
-        cols = [d[0] for d in c.description]
-        rows = [dict(zip(cols, row)) for row in c.fetchall()]
+        c.execute('SELECT * FROM equipment WHERE name ILIKE %s OR model ILIKE %s',
+                  (f'%{query}%', f'%{query}%'))
     else:
-        import sqlite3 as sq
-        conn.row_factory = sq.Row
-        c = conn.cursor()
-        c.execute('''
-            SELECT * FROM equipment
-            WHERE name LIKE ? OR model LIKE ?
-        ''', (f'%{query}%', f'%{query}%'))
-        rows = [dict(r) for r in c.fetchall()]
+        c.execute('SELECT * FROM equipment WHERE name LIKE ? OR model LIKE ?',
+                  (f'%{query}%', f'%{query}%'))
+    result = _rows_to_dicts(c)
     conn.close()
-    return rows
+    return result
 
 
 def get_all_equipment() -> list:
     conn = get_conn()
     c = conn.cursor()
-    if DATABASE_URL:
-        c.execute('SELECT id, name, model, base_price, currency FROM equipment ORDER BY name')
-        cols = [d[0] for d in c.description]
-        rows = [dict(zip(cols, row)) for row in c.fetchall()]
-    else:
-        import sqlite3 as sq
-        conn.row_factory = sq.Row
-        c = conn.cursor()
-        c.execute('SELECT id, name, model, base_price, currency FROM equipment ORDER BY name')
-        rows = [dict(r) for r in c.fetchall()]
+    c.execute('SELECT id, name, model, base_price, currency FROM equipment ORDER BY name')
+    result = _rows_to_dicts(c)
     conn.close()
-    return rows
+    return result
 
 
 def update_equipment(model: str, data: dict):
     conn = get_conn()
     c = conn.cursor()
-    ph = '%s' if DATABASE_URL else '?'
+    ph = PLACEHOLDER
     fields = ', '.join(f'{k} = {ph}' for k in data.keys())
     values = list(data.values()) + [model]
     c.execute(f'UPDATE equipment SET {fields} WHERE model = {ph}', values)
@@ -242,8 +241,71 @@ def update_equipment(model: str, data: dict):
 def delete_equipment(model: str):
     conn = get_conn()
     c = conn.cursor()
-    ph = '%s' if DATABASE_URL else '?'
-    c.execute(f'DELETE FROM equipment WHERE model = {ph}', (model,))
+    c.execute(f'DELETE FROM equipment WHERE model = {PLACEHOLDER}', (model,))
+    conn.commit()
+    conn.close()
+
+
+# ─── Блоки оборудования ──────────────────────────────────────────────────────
+
+def save_equipment_blocks(equipment_id: int, blocks: list):
+    """Сохраняет блоки оборудования. Удаляет старые и сохраняет новые."""
+    conn = get_conn()
+    c = conn.cursor()
+    ph = PLACEHOLDER
+
+    # Удаляем старые блоки
+    c.execute(f'DELETE FROM equipment_blocks WHERE equipment_id = {ph}', (equipment_id,))
+
+    # Сохраняем новые
+    for i, block in enumerate(blocks):
+        images = json.dumps(block.get('images', []), ensure_ascii=False)
+        c.execute(f'''
+            INSERT INTO equipment_blocks
+            (equipment_id, block_type, block_title, xml_content, images, sort_order)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+        ''', (
+            equipment_id,
+            block.get('type', 'unknown'),
+            block.get('title', ''),
+            block.get('xml', ''),
+            images,
+            i
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_equipment_blocks(equipment_id: int) -> list:
+    """Получает блоки оборудования в правильном порядке."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(f'''
+        SELECT * FROM equipment_blocks
+        WHERE equipment_id = {PLACEHOLDER}
+        ORDER BY sort_order
+    ''', (equipment_id,))
+    result = _rows_to_dicts(c)
+    conn.close()
+    return result
+
+
+def update_equipment_block(block_id: int, data: dict):
+    conn = get_conn()
+    c = conn.cursor()
+    ph = PLACEHOLDER
+    fields = ', '.join(f'{k} = {ph}' for k in data.keys())
+    values = list(data.values()) + [block_id]
+    c.execute(f'UPDATE equipment_blocks SET {fields} WHERE id = {ph}', values)
+    conn.commit()
+    conn.close()
+
+
+def delete_equipment_block(block_id: int):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(f'DELETE FROM equipment_blocks WHERE id = {PLACEHOLDER}', (block_id,))
     conn.commit()
     conn.close()
 
@@ -264,44 +326,25 @@ def generate_kp_number(equipment_models: list) -> str:
 def save_kp(data: dict) -> int:
     conn = get_conn()
     c = conn.cursor()
-    ph = '%s' if DATABASE_URL else '?'
+    ph = PLACEHOLDER
+
+    fields = ['kp_number', 'kp_date', 'client', 'equipment_list', 'total_price',
+              'currency', 'payment_terms', 'manager_id', 'manager_name',
+              'yandex_word_url', 'yandex_pdf_url', 'sheets_row']
+    values = [data.get(f) for f in fields]
+    placeholders = ', '.join([ph] * len(fields))
 
     if DATABASE_URL:
         c.execute(f'''
-            INSERT INTO kp_journal
-            (kp_number, kp_date, client, equipment_list, total_price, currency,
-             payment_terms, manager_id, manager_name,
-             yandex_word_url, yandex_pdf_url, yandex_word_id, yandex_pdf_id, sheets_row)
-            VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})
-            RETURNING id
-        ''', (
-            data.get('kp_number'), data.get('kp_date', datetime.now().strftime('%d.%m.%Y')),
-            data.get('client'), data.get('equipment_list'),
-            data.get('total_price'), data.get('currency', 'ЮАНЕЙ'),
-            data.get('payment_terms', '50% предоплата, 50% по факту поставки'),
-            data.get('manager_id'), data.get('manager_name'),
-            data.get('yandex_word_url'), data.get('yandex_pdf_url'),
-            data.get('yandex_word_id'), data.get('yandex_pdf_id'),
-            data.get('sheets_row'),
-        ))
+            INSERT INTO kp_journal ({', '.join(fields)})
+            VALUES ({placeholders}) RETURNING id
+        ''', values)
         kp_id = c.fetchone()[0]
     else:
         c.execute(f'''
-            INSERT INTO kp_journal
-            (kp_number, kp_date, client, equipment_list, total_price, currency,
-             payment_terms, manager_id, manager_name,
-             yandex_word_url, yandex_pdf_url, yandex_word_id, yandex_pdf_id, sheets_row)
-            VALUES ({ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph},{ph})
-        ''', (
-            data.get('kp_number'), data.get('kp_date', datetime.now().strftime('%d.%m.%Y')),
-            data.get('client'), data.get('equipment_list'),
-            data.get('total_price'), data.get('currency', 'ЮАНЕЙ'),
-            data.get('payment_terms', '50% предоплата, 50% по факту поставки'),
-            data.get('manager_id'), data.get('manager_name'),
-            data.get('yandex_word_url'), data.get('yandex_pdf_url'),
-            data.get('yandex_word_id'), data.get('yandex_pdf_id'),
-            data.get('sheets_row'),
-        ))
+            INSERT INTO kp_journal ({', '.join(fields)})
+            VALUES ({placeholders})
+        ''', values)
         kp_id = c.lastrowid
 
     conn.commit()
@@ -313,7 +356,7 @@ def update_kp(kp_number: str, data: dict):
     data['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     conn = get_conn()
     c = conn.cursor()
-    ph = '%s' if DATABASE_URL else '?'
+    ph = PLACEHOLDER
     fields = ', '.join(f'{k} = {ph}' for k in data.keys())
     values = list(data.values()) + [kp_number]
     c.execute(f'UPDATE kp_journal SET {fields} WHERE kp_number = {ph}', values)
@@ -324,14 +367,9 @@ def update_kp(kp_number: str, data: dict):
 def get_kp_by_number(kp_number: str) -> dict | None:
     conn = get_conn()
     c = conn.cursor()
-    ph = '%s' if DATABASE_URL else '?'
-    c.execute(f'SELECT * FROM kp_journal WHERE kp_number = {ph}', (kp_number,))
+    c.execute(f'SELECT * FROM kp_journal WHERE kp_number = {PLACEHOLDER}', (kp_number,))
     row = c.fetchone()
-    if row:
-        cols = [d[0] for d in c.description]
-        result = dict(zip(cols, row))
-    else:
-        result = None
+    result = _row_to_dict(c, row)
     conn.close()
     return result
 
@@ -351,16 +389,15 @@ def search_kp(query: str) -> list:
             WHERE client LIKE ? OR equipment_list LIKE ? OR kp_number LIKE ?
             ORDER BY created_at DESC LIMIT 10
         ''', (f'%{query}%', f'%{query}%', f'%{query}%'))
-    cols = [d[0] for d in c.description]
-    rows = [dict(zip(cols, row)) for row in c.fetchall()]
+    result = _rows_to_dicts(c)
     conn.close()
-    return rows
+    return result
 
 
 def get_recent_kp(manager_id: int = None, limit: int = 10) -> list:
     conn = get_conn()
     c = conn.cursor()
-    ph = '%s' if DATABASE_URL else '?'
+    ph = PLACEHOLDER
     if manager_id:
         c.execute(f'''
             SELECT * FROM kp_journal WHERE manager_id = {ph}
@@ -368,10 +405,9 @@ def get_recent_kp(manager_id: int = None, limit: int = 10) -> list:
         ''', (manager_id, limit))
     else:
         c.execute(f'SELECT * FROM kp_journal ORDER BY created_at DESC LIMIT {ph}', (limit,))
-    cols = [d[0] for d in c.description]
-    rows = [dict(zip(cols, row)) for row in c.fetchall()]
+    result = _rows_to_dicts(c)
     conn.close()
-    return rows
+    return result
 
 
 if __name__ == '__main__':
