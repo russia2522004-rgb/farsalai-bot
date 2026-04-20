@@ -136,7 +136,6 @@ def _add_horizontal_line(doc, insert_after_elem):
 
 def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
     """Добавляет блок условий для позиции с линиями сверху и снизу"""
-    warranty = item.get('warranty') or (eq.get('warranty') if eq else None) or '1 год. Изнашиваемые детали гарантийному обслуживанию не подлежат.'
     production_time = item.get('production_time') or (eq.get('production_time') if eq else None) or '25-30 дней'
     packaging = item.get('packaging') or (eq.get('packaging') if eq else None) or 'экспортная деревянная тара (ящик)'
     delivery = item.get('delivery') or (eq.get('delivery') if eq else None) or 'до завода покупателя'
@@ -151,7 +150,7 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
         ('Сроки изготовления:', production_time + '.'),
     ]
 
-    # Нижняя линия (добавляем первой — она окажется последней)
+    # Нижняя линия
     _add_horizontal_line(doc, insert_after_elem)
 
     # Добавляем условия снизу вверх
@@ -166,21 +165,7 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
         run_value.font.name = 'Arial'
         insert_after_elem.addnext(p._element)
 
-    # Гарантия
-    gp = doc.add_paragraph()
-    gr = gp.add_run(warranty)
-    gr.font.size = Pt(10)
-    gr.font.name = 'Arial'
-    insert_after_elem.addnext(gp._element)
-
-    gt = doc.add_paragraph()
-    gtr = gt.add_run('Гарантия')
-    gtr.bold = True
-    gtr.font.size = Pt(11)
-    gtr.font.name = 'Arial'
-    insert_after_elem.addnext(gt._element)
-
-    # Верхняя линия (добавляем последней — она окажется первой)
+    # Верхняя линия
     _add_horizontal_line(doc, insert_after_elem)
 
     return insert_after_elem
@@ -244,7 +229,6 @@ def _download_photo(photo_path: str, local_path: str) -> bool:
         headers = {'Authorization': f'OAuth {token}'}
         r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/download',
                          headers=headers, params={'path': photo_path})
-        print(f"Фото download статус: {r.status_code}, путь: {photo_path}")
         if r.status_code == 200:
             download_url = r.json().get('href')
             if download_url:
@@ -252,8 +236,6 @@ def _download_photo(photo_path: str, local_path: str) -> bool:
                 with open(local_path, 'wb') as f:
                     f.write(img_r.content)
                 return True
-        else:
-            print(f"Ошибка получения ссылки: {r.text[:200]}")
     except Exception as e:
         print(f"Ошибка скачивания фото: {e}")
     return False
@@ -315,17 +297,11 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
 
         # Фото оборудования
         if eq and eq.get('photo_path'):
-            # Нормализуем путь — убираем /КП/ если попало случайно
             photo_path = eq['photo_path']
             photo_local = f'temp_photo_{kp_number}_{model}.jpg'
             if _download_photo(photo_path, photo_local):
                 try:
-                    photo_p = doc.add_paragraph()
-                    photo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    run_photo = photo_p.add_run()
-                    run_photo.add_picture(photo_local, width=Inches(4))
-                    insert_after.addnext(photo_p._element)
-
+                    # Сноска под фото (добавляем первой — окажется после фото)
                     note_p = doc.add_paragraph()
                     note_r = note_p.add_run(
                         '* Фото для справки. Реальные фотографии будут предоставлены после завершения производства.')
@@ -333,6 +309,17 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     note_r.italic = True
                     note_r.font.name = 'Arial'
                     insert_after.addnext(note_p._element)
+
+                    # Пустая строка после фото
+                    space_p = doc.add_paragraph()
+                    insert_after.addnext(space_p._element)
+
+                    # Фото на всю ширину страницы (16.5 см — ширина A4 минус поля)
+                    photo_p = doc.add_paragraph()
+                    photo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run_photo = photo_p.add_run()
+                    run_photo.add_picture(photo_local, width=Cm(16.5))
+                    insert_after.addnext(photo_p._element)
                 except Exception as e:
                     print(f"Ошибка вставки фото: {e}")
                 finally:
