@@ -69,7 +69,7 @@ def _add_equipment_header(doc, insert_after_elem, name: str):
     run = p.add_run(name)
     run.bold = True
     run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)  # белый
-    run.font.size = Pt(14)
+    run.font.size = Pt(18)
     run.font.name = 'Arial'
 
     insert_after_elem.addnext(p._element)
@@ -94,19 +94,48 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str):
         return False
 
 
-def _add_section_title(doc, insert_after_elem, title: str):
-    """Добавляет заголовок раздела"""
+def _add_section_title(doc, insert_after_elem, title: str, number: int = 0):
+    """Добавляет заголовок раздела — серый фон, белый текст, шрифт 12"""
     p = doc.add_paragraph()
-    run = p.add_run(title)
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    # Серый фон
+    pPr = p._element.get_or_add_pPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), '595959')  # тёмно-серый
+    pPr.append(shd)
+
+    display_title = f"{number}. {title}" if number else title
+    run = p.add_run(display_title)
     run.bold = True
-    run.font.size = Pt(11)
+    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    run.font.size = Pt(12)
     run.font.name = 'Arial'
+
+    insert_after_elem.addnext(p._element)
+    return p._element
+
+
+def _add_horizontal_line(doc, insert_after_elem):
+    """Добавляет горизонтальную линию на всю ширину страницы"""
+    p = doc.add_paragraph()
+    pPr = p._element.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'), 'single')
+    bottom.set(qn('w:sz'), '6')
+    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:color'), '000000')
+    pBdr.append(bottom)
+    pPr.append(pBdr)
     insert_after_elem.addnext(p._element)
     return p._element
 
 
 def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
-    """Добавляет блок условий для позиции"""
+    """Добавляет блок условий для позиции с линиями сверху и снизу"""
     warranty = item.get('warranty') or (eq.get('warranty') if eq else None) or '1 год. Изнашиваемые детали гарантийному обслуживанию не подлежат.'
     production_time = item.get('production_time') or (eq.get('production_time') if eq else None) or '25-30 дней'
     packaging = item.get('packaging') or (eq.get('packaging') if eq else None) or 'экспортная деревянная тара (ящик)'
@@ -122,7 +151,10 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
         ('Сроки изготовления:', production_time + '.'),
     ]
 
-    # Добавляем снизу вверх (каждый addnext вставляет сразу после insert_after_elem)
+    # Нижняя линия (добавляем первой — она окажется последней)
+    _add_horizontal_line(doc, insert_after_elem)
+
+    # Добавляем условия снизу вверх
     for label, value in conditions:
         p = doc.add_paragraph()
         run_label = p.add_run(label + ' ')
@@ -147,6 +179,9 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
     gtr.font.size = Pt(11)
     gtr.font.name = 'Arial'
     insert_after_elem.addnext(gt._element)
+
+    # Верхняя линия (добавляем последней — она окажется первой)
+    _add_horizontal_line(doc, insert_after_elem)
 
     return insert_after_elem
 
@@ -209,6 +244,7 @@ def _download_photo(photo_path: str, local_path: str) -> bool:
         headers = {'Authorization': f'OAuth {token}'}
         r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/download',
                          headers=headers, params={'path': photo_path})
+        print(f"Фото download статус: {r.status_code}, путь: {photo_path}")
         if r.status_code == 200:
             download_url = r.json().get('href')
             if download_url:
@@ -216,6 +252,8 @@ def _download_photo(photo_path: str, local_path: str) -> bool:
                 with open(local_path, 'wb') as f:
                     f.write(img_r.content)
                 return True
+        else:
+            print(f"Ошибка получения ссылки: {r.text[:200]}")
     except Exception as e:
         print(f"Ошибка скачивания фото: {e}")
     return False
@@ -262,21 +300,25 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
         # Условия позиции
         _add_conditions_block(doc, insert_after, item, eq)
 
-        # Блоки из библиотеки (в обратном порядке)
-        for block in reversed(blocks):
+        # Блоки из библиотеки (в обратном порядке) с нумерацией
+        total_blocks = len(blocks)
+        for idx, block in enumerate(reversed(blocks)):
             block_title = block.get('block_title', '')
             xml_content = block.get('xml_content', '') or block.get('xml', '')
+            block_number = total_blocks - idx  # нумерация в правильном порядке
 
             if xml_content:
                 _insert_xml_block(doc, insert_after, xml_content)
-            
+
             if block_title:
-                _add_section_title(doc, insert_after, block_title)
+                _add_section_title(doc, insert_after, block_title, number=block_number)
 
         # Фото оборудования
         if eq and eq.get('photo_path'):
+            # Нормализуем путь — убираем /КП/ если попало случайно
+            photo_path = eq['photo_path']
             photo_local = f'temp_photo_{kp_number}_{model}.jpg'
-            if _download_photo(eq['photo_path'], photo_local):
+            if _download_photo(photo_path, photo_local):
                 try:
                     photo_p = doc.add_paragraph()
                     photo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
