@@ -211,7 +211,7 @@ def _add_section_title(doc, insert_after_elem, title: str, number: int = 0):
     return p._element
 
 
-def _add_horizontal_line(doc, insert_after_elem):
+def _add_horizontal_line(doc, insert_after_elem, keep_next=False):
     """Добавляет горизонтальную линию на всю ширину страницы"""
     p = doc.add_paragraph()
     pPr = p._element.get_or_add_pPr()
@@ -223,6 +223,14 @@ def _add_horizontal_line(doc, insert_after_elem):
     bottom.set(qn('w:color'), '000000')
     pBdr.append(bottom)
     pPr.append(pBdr)
+    if keep_next:
+        kn = OxmlElement('w:keepNext')
+        pPr.append(kn)
+    # Минимальный отступ
+    spacing = OxmlElement('w:spacing')
+    spacing.set(qn('w:before'), '0')
+    spacing.set(qn('w:after'), '0')
+    pPr.append(spacing)
     insert_after_elem.addnext(p._element)
     return p._element
 
@@ -261,8 +269,8 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
         run_value.font.name = 'Arial'
         insert_after_elem.addnext(p._element)
 
-    # Верхняя линия
-    _add_horizontal_line(doc, insert_after_elem)
+    # Верхняя линия — держится с условиями
+    _add_horizontal_line(doc, insert_after_elem, keep_next=True)
 
     return insert_after_elem
 
