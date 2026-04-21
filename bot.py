@@ -760,11 +760,30 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
 
             eq_id = add_equipment(eq_data)
 
-            # Сохраняем блоки
+            # Сохраняем блоки — загружаем картинки на Яндекс Диск
             if blocks:
                 try:
-                    save_equipment_blocks(eq_id, blocks)
-                    await update.message.reply_text(f'📦 Сохранено блоков: {len(blocks)}')
+                    model = eq_data.get('model', 'unknown')
+                    processed_blocks = []
+                    for i, block in enumerate(blocks):
+                        local_images = block.get('images', [])
+                        remote_images = []
+                        for local_img in local_images:
+                            if os.path.exists(local_img):
+                                try:
+                                    remote = upload_equipment_photo(
+                                        local_img,
+                                        f"{model}/blocks/block{i}_{os.path.basename(local_img)}"
+                                    )
+                                    remote_images.append(remote)
+                                    os.remove(local_img)
+                                except Exception as e:
+                                    logger.error(f"Ошибка загрузки картинки блока: {e}")
+                        block['images'] = remote_images
+                        processed_blocks.append(block)
+
+                    save_equipment_blocks(eq_id, processed_blocks)
+                    await update.message.reply_text(f'📦 Сохранено блоков: {len(processed_blocks)}')
                 except Exception as e:
                     logger.error(f"Ошибка сохранения блоков: {e}")
             await update.message.reply_text(f'✅ *{eq_data.get("name")}* добавлено!', parse_mode='Markdown')

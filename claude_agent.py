@@ -16,14 +16,22 @@ SECTION_HEADERS = {
     'расход рабочей жидкости': 'flow',
     'габаритные размеры': 'dimensions',
     'габаритный чертеж': 'drawing',
+    'назначение оборудования': 'purpose',
     'назначение': 'purpose',
     'конструкция насоса': 'design',
     'комплект поставки': 'supply',
     'дополнительные опции': 'options',
+    'дополнительная опция': 'options',
     'график рабочих характеристик': 'chart',
     'наименование': 'naming',
-    'назначение оборудования': 'purpose',
 }
+
+# Тексты которые НЕ являются заголовками разделов даже если совпадают
+NOT_SECTION_HEADERS = [
+    'гарантия не распространяется',
+    'гарантийный',
+    'гарантия на',
+]
 
 CONDITIONS_KEYWORDS = [
     'сроки изготовления', 'сроки поставки', 'срок изготовления', 'срок поставки',
@@ -138,13 +146,20 @@ def _is_section_header(elem) -> tuple:
     text = _get_elem_text(elem).lower()
     if not text:
         return None, None
-    is_header_style = bool(re.search(r'[Hh]eading|ХХХ|^\d+$', style))
+
+    # Проверяем исключения — тексты которые НЕ являются заголовками
+    for not_header in NOT_SECTION_HEADERS:
+        if text.startswith(not_header):
+            return None, None
+
+    is_header_style = bool(re.search(r'[Hh]eading|ХХХ|^\d+$', style)) or style == '1'
     if is_header_style:
         for keyword, block_type in SECTION_HEADERS.items():
             if keyword in text:
                 return block_type, _get_elem_text(elem)
+    # Точное совпадение по тексту (без стиля)
     for keyword, block_type in SECTION_HEADERS.items():
-        if text == keyword or text.startswith(keyword):
+        if text == keyword:
             return block_type, _get_elem_text(elem)
     return None, None
 
@@ -157,17 +172,66 @@ def _is_conditions_element(elem) -> bool:
 def extract_blocks_from_docx(doc_path: str) -> list:
     """
     Извлекает блоки из Word файла как XML фрагменты.
-    Сохраняет всё форматирование — таблицы, шрифты, стили.
+    Сохраняет форматирование — таблицы, шрифты, стили.
+    Извлекает картинки внутри блоков и сохраняет локально.
     """
     try:
         from docx import Document
-        from lxml import etree
+        from lxml import etree as et
+        import zipfile
     except ImportError:
         return []
 
     doc = Document(doc_path)
     body = doc.element.body
     elements = list(body)
+
+    # Читаем все медиафайлы из docx архива
+    media_files = {}
+    try:
+        with zipfile.ZipFile(doc_path, 'r') as z:
+            for name in z.namelist():
+                if name.startswith('word/media/'):
+                    media_files[name] = z.read(name)
+    except Exception as e:
+        print(f"Ошибка чтения медиафайлов: {e}")
+
+    # Читаем relationships для сопоставления rId → файл
+    rels = {}
+    try:
+        with zipfile.ZipFile(doc_path, 'r') as z:
+            if 'word/_rels/document.xml.rels' in z.namelist():
+                rel_xml = z.read('word/_rels/document.xml.rels')
+                rel_root = et.fromstring(rel_xml)
+                for rel in rel_root:
+                    rid = rel.get('Id', '')
+                    target = rel.get('Target', '')
+                    rels[rid] = target
+    except Exception as e:
+        print(f"Ошибка чтения relationships: {e}")
+
+    def get_block_images(block_elements) -> list:
+        """Извлекает картинки из элементов блока, возвращает список локальных путей"""
+        images = []
+        DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+        BLIP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+        REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+
+        for elem in block_elements:
+            for inline in list(elem.iter(f'{{{DRAW_NS}}}inline')) + list(elem.iter(f'{{{DRAW_NS}}}anchor')):
+                blips = list(inline.iter(f'{{{BLIP_NS}}}blip'))
+                for blip in blips:
+                    rid = blip.get(f'{{{REL_NS}}}embed', '')
+                    if rid and rid in rels:
+                        target = rels[rid]
+                        media_key = f'word/{target}' if not target.startswith('word/') else target
+                        if media_key in media_files:
+                            ext = os.path.splitext(target)[1] or '.png'
+                            local_path = f'temp_block_img_{rid}{ext}'
+                            with open(local_path, 'wb') as f:
+                                f.write(media_files[media_key])
+                            images.append(local_path)
+        return images
 
     blocks = []
     current_block = None
@@ -183,32 +247,31 @@ def extract_blocks_from_docx(doc_path: str) -> list:
         if block_type:
             # Сохраняем предыдущий блок
             if current_block and current_elements:
-                from lxml import etree as et
                 wrapper = et.Element('block')
                 for e in current_elements:
                     wrapper.append(copy.deepcopy(e))
+                images = get_block_images(current_elements)
                 blocks.append({
                     'type': current_block['type'],
                     'title': current_block['title'],
                     'xml': et.tostring(wrapper, encoding='unicode'),
-                    'images': []
+                    'images': images  # локальные пути к картинкам
                 })
             current_block = {'type': block_type, 'title': block_title}
             current_elements = []
 
         elif current_block:
             if _is_conditions_element(elem):
-                # Конец блоков — начались условия
                 if current_elements:
-                    from lxml import etree as et
                     wrapper = et.Element('block')
                     for e in current_elements:
                         wrapper.append(copy.deepcopy(e))
+                    images = get_block_images(current_elements)
                     blocks.append({
                         'type': current_block['type'],
                         'title': current_block['title'],
                         'xml': et.tostring(wrapper, encoding='unicode'),
-                        'images': []
+                        'images': images
                     })
                 current_block = None
                 current_elements = []
@@ -216,6 +279,26 @@ def extract_blocks_from_docx(doc_path: str) -> list:
                 text = _get_elem_text(elem)
                 if text or tag == 'tbl':
                     current_elements.append(elem)
+                elif tag == 'p':
+                    # Пустой параграф с картинкой
+                    DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+                    if list(elem.iter(f'{{{DRAW_NS}}}inline')) or list(elem.iter(f'{{{DRAW_NS}}}anchor')):
+                        current_elements.append(elem)
+
+    # Последний блок
+    if current_block and current_elements:
+        wrapper = et.Element('block')
+        for e in current_elements:
+            wrapper.append(copy.deepcopy(e))
+        images = get_block_images(current_elements)
+        blocks.append({
+            'type': current_block['type'],
+            'title': current_block['title'],
+            'xml': et.tostring(wrapper, encoding='unicode'),
+            'images': images
+        })
+
+    return blocks
 
     # Последний блок
     if current_block and current_elements:

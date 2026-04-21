@@ -121,13 +121,23 @@ def upload_kp_files(word_path: str, pdf_path: str, kp_number: str) -> tuple[str,
     return word_url, pdf_url
 
 
-def upload_equipment_photo(local_path: str, model: str) -> str:
-    """Загружает фото оборудования на Яндекс Диск"""
-    folder = f'{YANDEX_BASE_FOLDER}/Библиотека/{model}'
-    _ensure_folder(folder)
+def upload_equipment_photo(local_path: str, model_or_path: str) -> str:
+    """
+    Загружает фото оборудования на Яндекс Диск.
+    model_or_path: модель (например 'IE-2') или путь внутри Библиотеки (например 'IE-2/blocks/block0_img.png')
+    """
+    if '/' in model_or_path:
+        # Произвольный путь внутри Библиотеки
+        parts = model_or_path.split('/')
+        folder = f'{YANDEX_BASE_FOLDER}/Библиотека/{"/".join(parts[:-1])}'
+        remote_name = parts[-1]
+    else:
+        # Просто модель — сохраняем как фото
+        folder = f'{YANDEX_BASE_FOLDER}/Библиотека/{model_or_path}'
+        ext = os.path.splitext(local_path)[1]
+        remote_name = f'фото{ext}'
 
-    ext = os.path.splitext(local_path)[1]
-    remote_name = f'фото{ext}'
+    _ensure_folder(folder)
     remote_path = f'{folder}/{remote_name}'
 
     requests.delete(f'{YANDEX_API}/resources',
