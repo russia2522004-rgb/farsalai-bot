@@ -95,17 +95,19 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str):
 
 
 def _add_section_title(doc, insert_after_elem, title: str, number: int = 0):
-    """Добавляет заголовок раздела — серый фон, белый текст, шрифт 12"""
+    """Добавляет заголовок раздела — серый фон, белый текст, шрифт 12, не отрывается от следующего"""
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-    # Серый фон
+    # Серый фон + keepNext (не отрывать от следующего элемента)
     pPr = p._element.get_or_add_pPr()
     shd = OxmlElement('w:shd')
     shd.set(qn('w:val'), 'clear')
     shd.set(qn('w:color'), 'auto')
-    shd.set(qn('w:fill'), '595959')  # тёмно-серый
+    shd.set(qn('w:fill'), '595959')
     pPr.append(shd)
+    keepNext = OxmlElement('w:keepNext')
+    pPr.append(keepNext)
 
     display_title = f"{number}. {title}" if number else title
     run = p.add_run(display_title)
@@ -301,7 +303,11 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             photo_local = f'temp_photo_{kp_number}_{model}.jpg'
             if _download_photo(photo_path, photo_local):
                 try:
-                    # Сноска под фото (добавляем первой — окажется после фото)
+                    # Пустая строка после блока фото (после сноски)
+                    space_p = doc.add_paragraph()
+                    insert_after.addnext(space_p._element)
+
+                    # Сноска под фото
                     note_p = doc.add_paragraph()
                     note_r = note_p.add_run(
                         '* Фото для справки. Реальные фотографии будут предоставлены после завершения производства.')
@@ -310,11 +316,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     note_r.font.name = 'Arial'
                     insert_after.addnext(note_p._element)
 
-                    # Пустая строка после фото
-                    space_p = doc.add_paragraph()
-                    insert_after.addnext(space_p._element)
-
-                    # Фото на всю ширину страницы (16.5 см — ширина A4 минус поля)
+                    # Фото на всю ширину страницы
                     photo_p = doc.add_paragraph()
                     photo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     run_photo = photo_p.add_run()
