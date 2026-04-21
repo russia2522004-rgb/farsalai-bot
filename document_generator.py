@@ -131,8 +131,8 @@ def _get_first_content_type(xml_content: str) -> str:
     return 'text'
 
 
-def _insert_xml_block(doc, insert_after_elem, xml_content: str):
-    """Вставляет XML блок после указанного элемента"""
+def _insert_xml_block(doc, insert_after_elem, xml_content: str, block_images: list = None):
+    """Вставляет XML блок после указанного элемента. Заменяет картинки на скачанные."""
     try:
         from lxml import etree
         block = etree.fromstring(xml_content)
@@ -142,12 +142,40 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str):
 
         first_type = _get_first_content_type(xml_content)
 
-        # Вставляем в обратном порядке
-        for child in reversed(children):
+        # Если есть картинки из блока — вставляем их отдельными параграфами
+        # вместо попытки восстановить relationships
+        DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+
+        # Собираем элементы без drawing (картинок)
+        clean_children = []
+        drawing_count = 0
+        for child in children:
+            has_drawing = (list(child.iter(f'{{{DRAW_NS}}}inline')) or
+                          list(child.iter(f'{{{DRAW_NS}}}anchor')))
+            if has_drawing:
+                drawing_count += 1
+            else:
+                clean_children.append(child)
+
+        # Вставляем элементы без картинок в обратном порядке
+        for child in reversed(clean_children):
             child_copy = copy.deepcopy(child)
             insert_after_elem.addnext(child_copy)
 
-        # Получаем первый вставленный элемент
+        # Если были картинки и есть скачанные файлы — вставляем их
+        if drawing_count > 0 and block_images:
+            for img_path in reversed(block_images):
+                if img_path and os.path.exists(img_path):
+                    try:
+                        img_p = doc.add_paragraph()
+                        img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        run_img = img_p.add_run()
+                        run_img.add_picture(img_path, width=Cm(16.5))
+                        insert_after_elem.addnext(img_p._element)
+                    except Exception as e:
+                        print(f"Ошибка вставки картинки блока: {e}")
+
+        # Настройка разрывов
         parent = insert_after_elem.getparent()
         all_elems = list(parent)
         start_idx = all_elems.index(insert_after_elem) + 1
@@ -156,27 +184,19 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str):
             tag = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
 
             if first_type == 'table':
-                # Шапка повторяется + не разрывается
                 _set_cant_split_first_rows(first_inserted, rows=2)
-
-                # Вставляем пустой параграф-якорь с keepNext перед таблицей
-                # чтобы заголовок раздела держался с таблицей
                 anchor = OxmlElement('w:p')
                 anchorPr = OxmlElement('w:pPr')
                 kn = OxmlElement('w:keepNext')
                 anchorPr.append(kn)
-                # Минимальный отступ
                 spacing = OxmlElement('w:spacing')
                 spacing.set(qn('w:before'), '0')
                 spacing.set(qn('w:after'), '0')
                 anchorPr.append(spacing)
                 anchor.append(anchorPr)
                 first_inserted.addprevious(anchor)
-
             elif first_type == 'image':
-                # keepNext на параграф с картинкой — уже есть на заголовке
-                tag2 = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
-                if tag2 == 'p':
+                if tag == 'p':
                     _set_keep_next(first_inserted)
 
         return True
@@ -325,7 +345,69 @@ def _add_summary_table(doc, insert_after_elem, items: list):
     insert_after_elem.addnext(title_p._element)
 
 
-def _download_photo(photo_path: str, local_path: str) -> bool:
+def _copy_numbering_from_source(target_doc, source_xml_path: str):
+    """Копирует нумерацию из оригинального файла в целевой документ"""
+    try:
+        import zipfile
+        from lxml import etree
+        with zipfile.ZipFile(source_xml_path, 'r') as z:
+            if 'word/numbering.xml' not in z.namelist():
+                return
+            numbering_xml = z.read('word/numbering.xml')
+
+        # Добавляем numbering в целевой документ
+        numbering_part = target_doc.part.numbering_part
+        if numbering_part is None:
+            # Создаём новый numbering part
+            from docx.opc.part import Part
+            from docx.opc.packuri import PackURI
+            from docx.oxml.ns import nsmap
+            numbering_root = etree.fromstring(numbering_xml)
+            target_doc.part._element.getroottree()
+        else:
+            # Мёрджим numbering
+            src_root = etree.fromstring(numbering_xml)
+            dst_root = numbering_part._element
+
+            # Находим максимальный abstractNumId и numId в целевом
+            NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+            existing_abstract = {int(e.get(f'{{{NS_W}}}abstractNumId', 0))
+                                 for e in dst_root.findall(f'{{{NS_W}}}abstractNum')}
+            existing_num = {int(e.get(f'{{{NS_W}}}numId', 0))
+                           for e in dst_root.findall(f'{{{NS_W}}}num')}
+
+            max_abstract = max(existing_abstract) if existing_abstract else 0
+            max_num = max(existing_num) if existing_num else 0
+
+            # Маппинг старых ID → новых
+            abstract_map = {}
+            num_map = {}
+
+            for elem in src_root.findall(f'{{{NS_W}}}abstractNum'):
+                old_id = int(elem.get(f'{{{NS_W}}}abstractNumId', 0))
+                new_id = max_abstract + old_id + 1
+                abstract_map[old_id] = new_id
+                new_elem = copy.deepcopy(elem)
+                new_elem.set(f'{{{NS_W}}}abstractNumId', str(new_id))
+                dst_root.append(new_elem)
+
+            for elem in src_root.findall(f'{{{NS_W}}}num'):
+                old_num_id = int(elem.get(f'{{{NS_W}}}numId', 0))
+                new_num_id = max_num + old_num_id + 1
+                num_map[old_num_id] = new_num_id
+                new_elem = copy.deepcopy(elem)
+                new_elem.set(f'{{{NS_W}}}numId', str(new_num_id))
+                # Обновляем ссылку на abstractNum
+                abs_ref = new_elem.find(f'{{{NS_W}}}abstractNumId')
+                if abs_ref is not None:
+                    old_abs = int(abs_ref.get(f'{{{NS_W}}}val', 0))
+                    abs_ref.set(f'{{{NS_W}}}val', str(abstract_map.get(old_abs, old_abs)))
+                dst_root.append(new_elem)
+
+            return num_map
+    except Exception as e:
+        print(f"Ошибка копирования нумерации: {e}")
+    return {}
     """Скачивает фото с Яндекс Диска"""
     try:
         import requests
@@ -391,10 +473,25 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
         for idx, block in enumerate(reversed(blocks)):
             block_title = block.get('block_title', '')
             xml_content = block.get('xml_content', '') or block.get('xml', '')
-            block_number = total_blocks - idx  # нумерация в правильном порядке
+            block_number = total_blocks - idx
+
+            # Скачиваем картинки блока с Яндекс Диска
+            block_images = []
+            remote_images = json.loads(block.get('images', '[]')) if isinstance(block.get('images'), str) else (block.get('images') or [])
+            for remote_img in remote_images:
+                if remote_img:
+                    ext = os.path.splitext(remote_img)[1] or '.jpg'
+                    local_img = f'temp_block_img_{kp_number}_{idx}_{len(block_images)}{ext}'
+                    if _download_photo(remote_img, local_img):
+                        block_images.append(local_img)
 
             if xml_content:
-                _insert_xml_block(doc, insert_after, xml_content)
+                _insert_xml_block(doc, insert_after, xml_content, block_images)
+
+            # Удаляем временные файлы картинок
+            for local_img in block_images:
+                if os.path.exists(local_img):
+                    os.remove(local_img)
 
             if block_title:
                 _add_section_title(doc, insert_after, block_title, number=block_number)
@@ -418,9 +515,12 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     note_r.font.name = 'Arial'
                     insert_after.addnext(note_p._element)
 
-                    # Фото на всю ширину страницы
+                    # Фото на всю ширину страницы — с keepNext чтобы не отрывалось от заголовка
                     photo_p = doc.add_paragraph()
                     photo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    pPr = photo_p._element.get_or_add_pPr()
+                    kn = OxmlElement('w:keepNext')
+                    pPr.append(kn)
                     run_photo = photo_p.add_run()
                     run_photo.add_picture(photo_local, width=Cm(16.5))
                     insert_after.addnext(photo_p._element)
