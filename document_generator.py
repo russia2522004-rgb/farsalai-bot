@@ -427,6 +427,28 @@ def _copy_numbering_from_source(target_doc, source_xml_path: str):
     return False
 
 
+def _download_photo(photo_path: str, local_path: str) -> bool:
+    """Скачивает фото с Яндекс Диска"""
+    try:
+        import requests
+        token = os.getenv('YANDEX_DISK_TOKEN')
+        headers = {'Authorization': f'OAuth {token}'}
+        r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/download',
+                         headers=headers, params={'path': photo_path})
+        if r.status_code == 200:
+            download_url = r.json().get('href')
+            if download_url:
+                img_r = requests.get(download_url)
+                with open(local_path, 'wb') as f:
+                    f.write(img_r.content)
+                return True
+        else:
+            print(f"Ошибка получения ссылки фото {photo_path}: {r.status_code}")
+    except Exception as e:
+        print(f"Ошибка скачивания фото: {e}")
+    return False
+
+
 def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
     """Генерирует КП из блоков оборудования"""
     kp_number = kp_data.get('kp_number', 'KP-001')
