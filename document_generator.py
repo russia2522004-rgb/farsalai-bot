@@ -76,17 +76,88 @@ def _add_equipment_header(doc, insert_after_elem, name: str):
     return p._element
 
 
+def _set_keep_next(elem):
+    """Добавляет keepNext к параграфу — не отрывать от следующего элемента"""
+    NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    pPr = elem.find(f'{{{NS}}}pPr')
+    if pPr is None:
+        pPr = OxmlElement('w:pPr')
+        elem.insert(0, pPr)
+    keepNext = OxmlElement('w:keepNext')
+    pPr.append(keepNext)
+
+
+def _set_cant_split_first_rows(tbl_elem, rows=2):
+    """Запрещает разрывать первые N строк таблицы"""
+    NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    tr_list = tbl_elem.findall(f'{{{NS}}}tr')
+    for tr in tr_list[:rows]:
+        trPr = tr.find(f'{{{NS}}}trPr')
+        if trPr is None:
+            trPr = OxmlElement('w:trPr')
+            tr.insert(0, trPr)
+        cantSplit = OxmlElement('w:cantSplit')
+        trPr.append(cantSplit)
+
+
+def _get_first_content_type(xml_content: str) -> str:
+    """Определяет тип первого значимого элемента в блоке: 'table', 'image', 'text'"""
+    try:
+        from lxml import etree
+        NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        block = etree.fromstring(xml_content)
+        for child in block:
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if tag == 'tbl':
+                return 'table'
+            if tag == 'p':
+                # Проверяем есть ли картинка
+                drawing = child.find('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}inline')
+                if drawing is None:
+                    drawing = child.find('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}anchor')
+                if drawing is not None:
+                    return 'image'
+                # Есть текст?
+                texts = [t.text or '' for t in child.iter(f'{{{NS}}}t')]
+                if ''.join(texts).strip():
+                    return 'text'
+    except Exception:
+        pass
+    return 'text'
+
+
 def _insert_xml_block(doc, insert_after_elem, xml_content: str):
     """Вставляет XML блок после указанного элемента"""
     try:
         from lxml import etree
         block = etree.fromstring(xml_content)
-
-        # Вставляем дочерние элементы в обратном порядке
         children = list(block)
+
+        # Вставляем в обратном порядке
         for child in reversed(children):
             child_copy = copy.deepcopy(child)
             insert_after_elem.addnext(child_copy)
+
+        # Определяем тип первого элемента для настройки разрывов
+        first_type = _get_first_content_type(xml_content)
+
+        # Получаем реально вставленные элементы (первые N после insert_after_elem)
+        parent = insert_after_elem.getparent()
+        all_elems = list(parent)
+        start_idx = all_elems.index(insert_after_elem) + 1
+        inserted = all_elems[start_idx:start_idx + len(children)]
+
+        if inserted:
+            first_inserted = inserted[0]
+            tag = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
+
+            if first_type == 'table':
+                # Запрещаем разрывать шапку таблицы (первые 2 строки)
+                _set_cant_split_first_rows(first_inserted, rows=2)
+
+            elif first_type == 'image':
+                # Картинку держим с заголовком — keepNext уже есть на заголовке
+                pass
 
         return True
     except Exception as e:
@@ -155,9 +226,12 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
     # Нижняя линия
     _add_horizontal_line(doc, insert_after_elem)
 
-    # Добавляем условия снизу вверх
+    # Добавляем условия снизу вверх с keepLines
     for label, value in conditions:
         p = doc.add_paragraph()
+        pPr = p._element.get_or_add_pPr()
+        keepLines = OxmlElement('w:keepLines')
+        pPr.append(keepLines)
         run_label = p.add_run(label + ' ')
         run_label.bold = True
         run_label.font.size = Pt(10)
