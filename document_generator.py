@@ -88,16 +88,21 @@ def _set_keep_next(elem):
 
 
 def _set_cant_split_first_rows(tbl_elem, rows=2):
-    """Запрещает разрывать первые N строк таблицы"""
+    """Запрещает разрывать первые N строк таблицы + делает шапку повторяющейся"""
     NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     tr_list = tbl_elem.findall(f'{{{NS}}}tr')
-    for tr in tr_list[:rows]:
+    for i, tr in enumerate(tr_list[:rows]):
         trPr = tr.find(f'{{{NS}}}trPr')
         if trPr is None:
             trPr = OxmlElement('w:trPr')
             tr.insert(0, trPr)
+        # Не разрывать строку
         cantSplit = OxmlElement('w:cantSplit')
         trPr.append(cantSplit)
+        # Первая строка — повторять как заголовок на каждой странице
+        if i == 0:
+            tblHeader = OxmlElement('w:tblHeader')
+            trPr.append(tblHeader)
 
 
 def _get_first_content_type(xml_content: str) -> str:
@@ -132,32 +137,47 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str):
         from lxml import etree
         block = etree.fromstring(xml_content)
         children = list(block)
+        if not children:
+            return False
+
+        first_type = _get_first_content_type(xml_content)
 
         # Вставляем в обратном порядке
         for child in reversed(children):
             child_copy = copy.deepcopy(child)
             insert_after_elem.addnext(child_copy)
 
-        # Определяем тип первого элемента для настройки разрывов
-        first_type = _get_first_content_type(xml_content)
-
-        # Получаем реально вставленные элементы (первые N после insert_after_elem)
+        # Получаем первый вставленный элемент
         parent = insert_after_elem.getparent()
         all_elems = list(parent)
         start_idx = all_elems.index(insert_after_elem) + 1
-        inserted = all_elems[start_idx:start_idx + len(children)]
-
-        if inserted:
-            first_inserted = inserted[0]
+        if start_idx < len(all_elems):
+            first_inserted = all_elems[start_idx]
             tag = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
 
             if first_type == 'table':
-                # Запрещаем разрывать шапку таблицы (первые 2 строки)
+                # Шапка повторяется + не разрывается
                 _set_cant_split_first_rows(first_inserted, rows=2)
 
+                # Вставляем пустой параграф-якорь с keepNext перед таблицей
+                # чтобы заголовок раздела держался с таблицей
+                anchor = OxmlElement('w:p')
+                anchorPr = OxmlElement('w:pPr')
+                kn = OxmlElement('w:keepNext')
+                anchorPr.append(kn)
+                # Минимальный отступ
+                spacing = OxmlElement('w:spacing')
+                spacing.set(qn('w:before'), '0')
+                spacing.set(qn('w:after'), '0')
+                anchorPr.append(spacing)
+                anchor.append(anchorPr)
+                first_inserted.addprevious(anchor)
+
             elif first_type == 'image':
-                # Картинку держим с заголовком — keepNext уже есть на заголовке
-                pass
+                # keepNext на параграф с картинкой — уже есть на заголовке
+                tag2 = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
+                if tag2 == 'p':
+                    _set_keep_next(first_inserted)
 
         return True
     except Exception as e:
