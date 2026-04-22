@@ -562,6 +562,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('🤖 Анализирую содержимое...')
         items = extract_all_equipment_from_doc(doc_text, doc_path=local_path)
 
+        if items:
+            blocks_count = len(items[0].get('blocks', []))
+            print(f"DEBUG: извлечено позиций={len(items)}, блоков={blocks_count}")
+
         if not items:
             await update.message.reply_text('❌ Оборудование не распознано. Возможно это не КП?')
             os.remove(local_path)
