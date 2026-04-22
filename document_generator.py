@@ -131,22 +131,49 @@ def _get_first_content_type(xml_content: str) -> str:
     return 'text'
 
 
-def _insert_xml_block(doc, insert_after_elem, xml_content: str, block_images: list = None):
-    """Вставляет XML блок после указанного элемента. Заменяет картинки на скачанные."""
+def _fix_numbering_to_bullets(xml_content: str) -> str:
+    """Заменяет нумерованные списки на маркированные в XML блока"""
     try:
         from lxml import etree
+        NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        block = etree.fromstring(xml_content)
+        for numPr in list(block.iter(f'{{{NS}}}numPr')):
+            parent_pPr = numPr.getparent()
+            if parent_pPr is None:
+                continue
+            parent_pPr.remove(numPr)
+            ind = parent_pPr.find(f'{{{NS}}}ind')
+            if ind is None:
+                ind = etree.SubElement(parent_pPr, f'{{{NS}}}ind')
+            ind.set(f'{{{NS}}}left', '360')
+            para = parent_pPr.getparent()
+            if para is not None:
+                bullet_run = etree.Element(f'{{{NS}}}r')
+                bullet_t = etree.SubElement(bullet_run, f'{{{NS}}}t')
+                bullet_t.text = '• '
+                bullet_t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                pPr_idx = list(para).index(parent_pPr)
+                para.insert(pPr_idx + 1, bullet_run)
+        return etree.tostring(block, encoding='unicode')
+    except Exception as e:
+        print(f"Ошибка замены нумерации: {e}")
+        return xml_content
+
+
+def _insert_xml_block(doc, insert_after_elem, xml_content: str, block_images: list = None):
+    """Вставляет XML блок после указанного элемента."""
+    try:
+        from lxml import etree
+
+        xml_content = _fix_numbering_to_bullets(xml_content)
         block = etree.fromstring(xml_content)
         children = list(block)
         if not children:
             return False
 
         first_type = _get_first_content_type(xml_content)
-
-        # Если есть картинки из блока — вставляем их отдельными параграфами
-        # вместо попытки восстановить relationships
         DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
 
-        # Собираем элементы без drawing (картинок)
         clean_children = []
         drawing_count = 0
         for child in children:
@@ -157,32 +184,45 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str, block_images: li
             else:
                 clean_children.append(child)
 
-        # Вставляем элементы без картинок в обратном порядке
         for child in reversed(clean_children):
             child_copy = copy.deepcopy(child)
             insert_after_elem.addnext(child_copy)
 
-        # Если были картинки и есть скачанные файлы — вставляем их
         if drawing_count > 0 and block_images:
             for img_path in reversed(block_images):
                 if img_path and os.path.exists(img_path):
                     try:
+                        try:
+                            from PIL import Image as PILImage
+                            with PILImage.open(img_path) as pil_img:
+                                orig_w, orig_h = pil_img.size
+                                dpi = pil_img.info.get('dpi', (96, 96))
+                                dpi = dpi[0] if isinstance(dpi, tuple) else dpi or 96
+                                w_cm = orig_w / dpi * 2.54
+                                h_cm = orig_h / dpi * 2.54
+                        except Exception:
+                            w_cm, h_cm = 14.0, 8.0
+                        max_w, max_h = 14.0, 10.0
+                        if w_cm > max_w:
+                            h_cm = h_cm * max_w / w_cm
+                            w_cm = max_w
+                        if h_cm > max_h:
+                            w_cm = w_cm * max_h / h_cm
+                            h_cm = max_h
                         img_p = doc.add_paragraph()
                         img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         run_img = img_p.add_run()
-                        run_img.add_picture(img_path, width=Cm(16.5))
+                        run_img.add_picture(img_path, width=Cm(w_cm))
                         insert_after_elem.addnext(img_p._element)
                     except Exception as e:
                         print(f"Ошибка вставки картинки блока: {e}")
 
-        # Настройка разрывов
         parent = insert_after_elem.getparent()
         all_elems = list(parent)
         start_idx = all_elems.index(insert_after_elem) + 1
         if start_idx < len(all_elems):
             first_inserted = all_elems[start_idx]
             tag = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
-
             if first_type == 'table':
                 _set_cant_split_first_rows(first_inserted, rows=2)
                 anchor = OxmlElement('w:p')
@@ -550,7 +590,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     kn = OxmlElement('w:keepNext')
                     pPr.append(kn)
                     run_photo = photo_p.add_run()
-                    run_photo.add_picture(photo_local, width=Cm(16.5))
+                    run_photo.add_picture(photo_local, width=Cm(14))
                     insert_after.addnext(photo_p._element)
                 except Exception as e:
                     print(f"Ошибка вставки фото: {e}")
