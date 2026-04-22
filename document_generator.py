@@ -506,6 +506,13 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
         '{{KP_NUMBER}}': kp_number,
     })
 
+    # Добавляем keepLines к параграфу подписи
+    for para in doc.paragraphs:
+        if 'уважением' in para.text or 'Лавришко' in para.text:
+            pPr = para._element.get_or_add_pPr()
+            kl = OxmlElement('w:keepLines')
+            pPr.append(kl)
+
     # Находим {{CONTENT}}
     content_para = _find_content_placeholder(doc)
     if content_para is None:
@@ -570,7 +577,21 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             photo_local = f'temp_photo_{kp_number}_{model}.jpg'
             if _download_photo(photo_path, photo_local):
                 try:
-                    # Пустая строка после блока фото (после сноски)
+                    # Определяем размер фото
+                    try:
+                        from PIL import Image as PILImage
+                        with PILImage.open(photo_local) as pil_img:
+                            orig_w, orig_h = pil_img.size
+                        # Масштабируем: макс 14 см по ширине, макс 9 см по высоте
+                        w_cm = 14.0
+                        h_cm = orig_h / orig_w * w_cm
+                        if h_cm > 9.0:
+                            h_cm = 9.0
+                            w_cm = orig_w / orig_h * h_cm
+                    except Exception:
+                        w_cm = 12.0
+
+                    # Пустая строка после блока фото
                     space_p = doc.add_paragraph()
                     insert_after.addnext(space_p._element)
 
@@ -583,14 +604,14 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     note_r.font.name = 'Arial'
                     insert_after.addnext(note_p._element)
 
-                    # Фото на всю ширину страницы — с keepNext чтобы не отрывалось от заголовка
+                    # Фото с keepNext
                     photo_p = doc.add_paragraph()
                     photo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     pPr = photo_p._element.get_or_add_pPr()
                     kn = OxmlElement('w:keepNext')
                     pPr.append(kn)
                     run_photo = photo_p.add_run()
-                    run_photo.add_picture(photo_local, width=Cm(14))
+                    run_photo.add_picture(photo_local, width=Cm(w_cm))
                     insert_after.addnext(photo_p._element)
                 except Exception as e:
                     print(f"Ошибка вставки фото: {e}")
