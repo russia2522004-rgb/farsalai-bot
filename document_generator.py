@@ -497,20 +497,26 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             xml_content = block.get('xml_content', '') or block.get('xml', '')
             block_number = total_blocks - idx
 
-            # Скачиваем картинки блока с Яндекс Диска
+            # Берём картинки из base64 (без обращения к Яндекс Диску)
             block_images = []
-            remote_images = json.loads(block.get('images', '[]')) if isinstance(block.get('images'), str) else (block.get('images') or [])
-            for remote_img in remote_images:
-                if remote_img:
-                    ext = os.path.splitext(remote_img)[1] or '.jpg'
-                    local_img = f'temp_block_img_{kp_number}_{idx}_{len(block_images)}{ext}'
-                    if _download_photo(remote_img, local_img):
+            images_b64 = json.loads(block.get('images_base64', '[]')) if isinstance(block.get('images_base64'), str) else (block.get('images_base64') or [])
+            for b64_str in images_b64:
+                if b64_str and b64_str.startswith('data:image/'):
+                    try:
+                        import base64 as b64mod
+                        header, data = b64_str.split(',', 1)
+                        ext = header.split('/')[1].split(';')[0]
+                        local_img = f'temp_b64_img_{kp_number}_{idx}_{len(block_images)}.{ext}'
+                        with open(local_img, 'wb') as f:
+                            f.write(b64mod.b64decode(data))
                         block_images.append(local_img)
+                    except Exception as e:
+                        print(f"Ошибка декодирования base64 картинки: {e}")
 
             if xml_content:
                 _insert_xml_block(doc, insert_after, xml_content, block_images)
 
-            # Удаляем временные файлы картинок
+            # Удаляем временные файлы
             for local_img in block_images:
                 if os.path.exists(local_img):
                     os.remove(local_img)

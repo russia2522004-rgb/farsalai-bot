@@ -210,9 +210,10 @@ def extract_blocks_from_docx(doc_path: str) -> list:
     except Exception as e:
         print(f"Ошибка чтения relationships: {e}")
 
-    def get_block_images(block_elements) -> list:
-        """Извлекает картинки из элементов блока, возвращает список локальных путей"""
-        images = []
+    def get_block_images_base64(block_elements) -> list:
+        """Извлекает картинки из элементов блока как base64"""
+        import base64
+        images_b64 = []
         DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
         BLIP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
         REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
@@ -226,12 +227,12 @@ def extract_blocks_from_docx(doc_path: str) -> list:
                         target = rels[rid]
                         media_key = f'word/{target}' if not target.startswith('word/') else target
                         if media_key in media_files:
-                            ext = os.path.splitext(target)[1] or '.png'
-                            local_path = f'temp_block_img_{rid}{ext}'
-                            with open(local_path, 'wb') as f:
-                                f.write(media_files[media_key])
-                            images.append(local_path)
-        return images
+                            b64 = base64.b64encode(media_files[media_key]).decode('utf-8')
+                            # Определяем тип
+                            ext = os.path.splitext(target)[1].lower().lstrip('.')
+                            mime = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'gif': 'gif'}.get(ext, 'png')
+                            images_b64.append(f'data:image/{mime};base64,{b64}')
+        return images_b64
 
     blocks = []
     current_block = None
@@ -250,12 +251,12 @@ def extract_blocks_from_docx(doc_path: str) -> list:
                 wrapper = et.Element('block')
                 for e in current_elements:
                     wrapper.append(copy.deepcopy(e))
-                images = get_block_images(current_elements)
+                images_b64 = get_block_images_base64(current_elements)
                 blocks.append({
                     'type': current_block['type'],
                     'title': current_block['title'],
                     'xml': et.tostring(wrapper, encoding='unicode'),
-                    'images': images  # локальные пути к картинкам
+                    'images': [], 'images_base64': images_b64  # локальные пути к картинкам
                 })
             current_block = {'type': block_type, 'title': block_title}
             current_elements = []
@@ -266,12 +267,12 @@ def extract_blocks_from_docx(doc_path: str) -> list:
                     wrapper = et.Element('block')
                     for e in current_elements:
                         wrapper.append(copy.deepcopy(e))
-                    images = get_block_images(current_elements)
+                    images_b64 = get_block_images_base64(current_elements)
                     blocks.append({
                         'type': current_block['type'],
                         'title': current_block['title'],
                         'xml': et.tostring(wrapper, encoding='unicode'),
-                        'images': images
+                        'images': [], 'images_base64': images_b64
                     })
                 current_block = None
                 current_elements = []
@@ -290,12 +291,12 @@ def extract_blocks_from_docx(doc_path: str) -> list:
         wrapper = et.Element('block')
         for e in current_elements:
             wrapper.append(copy.deepcopy(e))
-        images = get_block_images(current_elements)
+        images_b64 = get_block_images_base64(current_elements)
         blocks.append({
             'type': current_block['type'],
             'title': current_block['title'],
             'xml': et.tostring(wrapper, encoding='unicode'),
-            'images': images
+            'images': [], 'images_base64': images_b64
         })
 
     return blocks

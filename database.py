@@ -87,6 +87,12 @@ def init_db():
             except Exception:
                 pass
 
+        # Миграция equipment_blocks — добавляем images_base64
+        try:
+            c.execute('ALTER TABLE equipment_blocks ADD COLUMN images_base64 TEXT DEFAULT \'[]\'')
+        except Exception:
+            pass
+
     else:
         c.execute('''
             CREATE TABLE IF NOT EXISTS equipment (
@@ -254,22 +260,22 @@ def save_equipment_blocks(equipment_id: int, blocks: list):
     c = conn.cursor()
     ph = PLACEHOLDER
 
-    # Удаляем старые блоки
     c.execute(f'DELETE FROM equipment_blocks WHERE equipment_id = {ph}', (equipment_id,))
 
-    # Сохраняем новые
     for i, block in enumerate(blocks):
         images = json.dumps(block.get('images', []), ensure_ascii=False)
+        images_base64 = json.dumps(block.get('images_base64', []), ensure_ascii=False)
         c.execute(f'''
             INSERT INTO equipment_blocks
-            (equipment_id, block_type, block_title, xml_content, images, sort_order)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            (equipment_id, block_type, block_title, xml_content, images, images_base64, sort_order)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
         ''', (
             equipment_id,
             block.get('type', 'unknown'),
             block.get('title', ''),
             block.get('xml', ''),
             images,
+            images_base64,
             i
         ))
 

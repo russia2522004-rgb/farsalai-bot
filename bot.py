@@ -760,30 +760,11 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
 
             eq_id = add_equipment(eq_data)
 
-            # Сохраняем блоки — загружаем картинки на Яндекс Диск
+            # Сохраняем блоки с base64 картинками
             if blocks:
                 try:
-                    model = eq_data.get('model', 'unknown')
-                    processed_blocks = []
-                    for i, block in enumerate(blocks):
-                        local_images = block.get('images', [])
-                        remote_images = []
-                        for local_img in local_images:
-                            if os.path.exists(local_img):
-                                try:
-                                    remote = upload_equipment_photo(
-                                        local_img,
-                                        f"{model}/blocks/block{i}_{os.path.basename(local_img)}"
-                                    )
-                                    remote_images.append(remote)
-                                    os.remove(local_img)
-                                except Exception as e:
-                                    logger.error(f"Ошибка загрузки картинки блока: {e}")
-                        block['images'] = remote_images
-                        processed_blocks.append(block)
-
-                    save_equipment_blocks(eq_id, processed_blocks)
-                    await update.message.reply_text(f'📦 Сохранено блоков: {len(processed_blocks)}')
+                    save_equipment_blocks(eq_id, blocks)
+                    await update.message.reply_text(f'📦 Сохранено блоков: {len(blocks)}')
                 except Exception as e:
                     logger.error(f"Ошибка сохранения блоков: {e}")
             await update.message.reply_text(f'✅ *{eq_data.get("name")}* добавлено!', parse_mode='Markdown')
@@ -1058,7 +1039,7 @@ def main():
         logger.warning(f'Google Sheets недоступен: {e}')
 
     token = os.getenv('TELEGRAM_BOT_TOKEN')
-    app = Application.builder().token(token).read_timeout(60).write_timeout(60).connect_timeout(60).build()
+    app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_command))
