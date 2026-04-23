@@ -81,6 +81,7 @@ def init_db():
             ('delivery', "TEXT DEFAULT 'до завода покупателя'"),
             ('payment_terms', "TEXT DEFAULT '50% – предоплата, 50% – по факту поставки'"),
             ('original_file_path', 'TEXT'),
+            ('numbering_xml', 'TEXT'),
         ]:
             try:
                 c.execute(f'ALTER TABLE equipment ADD COLUMN {col} {definition}')
@@ -171,7 +172,8 @@ def add_equipment(data: dict) -> int:
 
     fields = ['name', 'model', 'description', 'specs', 'warranty',
               'production_time', 'packaging', 'delivery', 'payment_terms',
-              'base_price', 'currency', 'photo_path', 'original_file_path']
+              'base_price', 'currency', 'photo_path', 'original_file_path',
+              'numbering_xml']
     values = [data.get(f) for f in fields]
 
     if DATABASE_URL:
