@@ -376,6 +376,55 @@ def _download_photo(photo_path: str, local_path: str) -> bool:
     return False
 
 
+def _apply_numbering_xml(doc, numbering_xml: str):
+    """Копирует numbering.xml из оригинального документа в текущий"""
+    if not numbering_xml:
+        return
+    try:
+        from lxml import etree
+        from docx.oxml.ns import nsmap
+        from docx.opc.part import Part
+        from docx.opc.packuri import PackURI
+
+        src_root = etree.fromstring(numbering_xml.encode('utf-8'))
+
+        # Проверяем есть ли уже numbering part в документе
+        numbering_part = doc.part.numbering_part
+        if numbering_part is None:
+            # Создаём новый numbering part
+            num_part = Part(
+                PackURI('/word/numbering.xml'),
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml',
+                numbering_xml.encode('utf-8')
+            )
+            doc.part.relate_to(
+                num_part,
+                'http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering'
+            )
+        else:
+            # Мёрджим — добавляем недостающие abstractNum и num
+            dst_root = numbering_part._element
+            NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
+            existing_abstract = {int(e.get(f'{{{NS_W}}}abstractNumId', 0))
+                                 for e in dst_root.findall(f'{{{NS_W}}}abstractNum')}
+            existing_num = {int(e.get(f'{{{NS_W}}}numId', 0))
+                           for e in dst_root.findall(f'{{{NS_W}}}num')}
+
+            for elem in src_root.findall(f'{{{NS_W}}}abstractNum'):
+                aid = int(elem.get(f'{{{NS_W}}}abstractNumId', -1))
+                if aid not in existing_abstract:
+                    dst_root.append(copy.deepcopy(elem))
+
+            for elem in src_root.findall(f'{{{NS_W}}}num'):
+                nid = int(elem.get(f'{{{NS_W}}}numId', -1))
+                if nid not in existing_num:
+                    dst_root.append(copy.deepcopy(elem))
+
+    except Exception as e:
+        print(f"Ошибка применения numbering.xml: {e}")
+
+
 def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
     """Генерирует КП из блоков оборудования"""
     kp_number = kp_data.get('kp_number', 'KP-001')
@@ -422,6 +471,10 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
 
         # Условия позиции
         _add_conditions_block(doc, insert_after, item, eq)
+
+        # Применяем numbering.xml из оригинального документа
+        if eq and eq.get('numbering_xml'):
+            _apply_numbering_xml(doc, eq['numbering_xml'])
 
         # Блоки из библиотеки
         total_blocks = len(blocks)

@@ -169,6 +169,18 @@ def _is_conditions_element(elem) -> bool:
     return any(kw in text for kw in CONDITIONS_KEYWORDS)
 
 
+def extract_numbering_xml(doc_path: str) -> str:
+    """Извлекает numbering.xml из Word файла"""
+    try:
+        import zipfile
+        with zipfile.ZipFile(doc_path, 'r') as z:
+            if 'word/numbering.xml' in z.namelist():
+                return z.read('word/numbering.xml').decode('utf-8')
+    except Exception as e:
+        print(f"Ошибка извлечения numbering.xml: {e}")
+    return ''
+
+
 def extract_blocks_from_docx(doc_path: str) -> list:
     """
     Извлекает блоки из Word файла как XML фрагменты.
@@ -349,17 +361,18 @@ def extract_equipment_info_from_text(doc_text: str) -> dict:
 
 def extract_all_equipment_from_doc(doc_text: str, doc_path: str = None) -> list:
     """Извлекает оборудование из документа. doc_path нужен для извлечения XML блоков."""
-    # Данные оборудования через Claude
     equipment = extract_equipment_info_from_text(doc_text)
     if not equipment:
         return []
 
-    # Блоки через XML если есть путь к файлу
     blocks = []
+    numbering_xml = ''
     if doc_path and os.path.exists(doc_path):
         blocks = extract_blocks_from_docx(doc_path)
+        numbering_xml = extract_numbering_xml(doc_path)
 
     equipment['blocks'] = blocks
+    equipment['numbering_xml'] = numbering_xml
     return [equipment]
 
 

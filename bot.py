@@ -747,9 +747,13 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
             eq_data = session.get('pending_equipment', {})
             photo_path = eq_data.pop('_photo_path', None)
             blocks = eq_data.pop('blocks', [])
+            numbering_xml = eq_data.pop('numbering_xml', '')
 
             if isinstance(eq_data.get('specs'), list):
                 eq_data['specs'] = json.dumps(eq_data['specs'], ensure_ascii=False)
+
+            if numbering_xml:
+                eq_data['numbering_xml'] = numbering_xml
 
             # Загружаем фото на Яндекс Диск
             if photo_path and os.path.exists(photo_path):
