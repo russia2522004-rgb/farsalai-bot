@@ -1,6 +1,7 @@
 import os
 import json
 import copy
+import base64
 from datetime import datetime
 from docx import Document
 from docx.shared import Pt, Cm, Inches, RGBColor
@@ -42,7 +43,6 @@ def _replace_in_document(doc, replacements: dict):
 
 
 def _find_content_placeholder(doc):
-    """Находит параграф с {{CONTENT}}"""
     for para in doc.paragraphs:
         if '{{CONTENT}}' in ''.join(r.text for r in para.runs):
             return para
@@ -50,79 +50,106 @@ def _find_content_placeholder(doc):
 
 
 def _add_equipment_header(doc, insert_after_elem, name: str):
-    """Добавляет заголовок оборудования в чёрной рамке"""
-    from lxml import etree
-
-    # Создаём параграф с чёрным фоном как в оригинале
+    """Заголовок оборудования — чёрный фон, белый текст, 18pt"""
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    # Форматирование параграфа — чёрный фон
     pPr = p._element.get_or_add_pPr()
     shd = OxmlElement('w:shd')
     shd.set(qn('w:val'), 'clear')
     shd.set(qn('w:color'), 'auto')
-    shd.set(qn('w:fill'), '000000')  # чёрный фон
+    shd.set(qn('w:fill'), '000000')
     pPr.append(shd)
-
-    # Текст белый жирный
     run = p.add_run(name)
     run.bold = True
-    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)  # белый
+    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
     run.font.size = Pt(18)
     run.font.name = 'Arial'
+    insert_after_elem.addnext(p._element)
+    return p._element
 
+
+def _add_section_title(doc, insert_after_elem, title: str, number: int = 0):
+    """Заголовок раздела — серый фон, белый текст, keepNext"""
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    pPr = p._element.get_or_add_pPr()
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'), '595959')
+    pPr.append(shd)
+    kn = OxmlElement('w:keepNext')
+    pPr.append(kn)
+    display_title = f"{number}. {title}" if number else title
+    run = p.add_run(display_title)
+    run.bold = True
+    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    run.font.size = Pt(12)
+    run.font.name = 'Arial'
+    insert_after_elem.addnext(p._element)
+    return p._element
+
+
+def _add_horizontal_line(doc, insert_after_elem, keep_next=False):
+    """Горизонтальная линия"""
+    p = doc.add_paragraph()
+    pPr = p._element.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'), 'single')
+    bottom.set(qn('w:sz'), '6')
+    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:color'), '000000')
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+    if keep_next:
+        kn = OxmlElement('w:keepNext')
+        pPr.append(kn)
+    spacing = OxmlElement('w:spacing')
+    spacing.set(qn('w:before'), '0')
+    spacing.set(qn('w:after'), '0')
+    pPr.append(spacing)
     insert_after_elem.addnext(p._element)
     return p._element
 
 
 def _set_keep_next(elem):
-    """Добавляет keepNext к параграфу — не отрывать от следующего элемента"""
-    NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     pPr = elem.find(f'{{{NS}}}pPr')
     if pPr is None:
         pPr = OxmlElement('w:pPr')
         elem.insert(0, pPr)
-    keepNext = OxmlElement('w:keepNext')
-    pPr.append(keepNext)
+    kn = OxmlElement('w:keepNext')
+    pPr.append(kn)
 
 
 def _set_cant_split_first_rows(tbl_elem, rows=2):
-    """Запрещает разрывать первые N строк таблицы + делает шапку повторяющейся"""
-    NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    """Запрещает разрывать первые строки таблицы + повторяет шапку"""
     tr_list = tbl_elem.findall(f'{{{NS}}}tr')
     for i, tr in enumerate(tr_list[:rows]):
         trPr = tr.find(f'{{{NS}}}trPr')
         if trPr is None:
             trPr = OxmlElement('w:trPr')
             tr.insert(0, trPr)
-        # Не разрывать строку
         cantSplit = OxmlElement('w:cantSplit')
         trPr.append(cantSplit)
-        # Первая строка — повторять как заголовок на каждой странице
         if i == 0:
             tblHeader = OxmlElement('w:tblHeader')
             trPr.append(tblHeader)
 
 
 def _get_first_content_type(xml_content: str) -> str:
-    """Определяет тип первого значимого элемента в блоке: 'table', 'image', 'text'"""
+    """Определяет тип первого значимого элемента в блоке"""
     try:
         from lxml import etree
-        NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
         block = etree.fromstring(xml_content)
         for child in block:
             tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
             if tag == 'tbl':
                 return 'table'
             if tag == 'p':
-                # Проверяем есть ли картинка
-                drawing = child.find('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}inline')
-                if drawing is None:
-                    drawing = child.find('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}anchor')
-                if drawing is not None:
+                if list(child.iter(f'{{{DRAW_NS}}}inline')) or list(child.iter(f'{{{DRAW_NS}}}anchor')):
                     return 'image'
-                # Есть текст?
                 texts = [t.text or '' for t in child.iter(f'{{{NS}}}t')]
                 if ''.join(texts).strip():
                     return 'text'
@@ -131,98 +158,93 @@ def _get_first_content_type(xml_content: str) -> str:
     return 'text'
 
 
-def _fix_numbering_to_bullets(xml_content: str) -> str:
-    """Заменяет нумерованные списки на маркированные в XML блока"""
+def _add_images_to_doc(doc, images_b64: list) -> dict:
+    """
+    Добавляет картинки из base64 в документ как relationships.
+    Возвращает маппинг порядкового номера → новый rId.
+    """
+    from docx.opc.part import Part
+    from docx.opc.packuri import PackURI
+
+    rid_map = {}
+    for i, b64_str in enumerate(images_b64):
+        if not b64_str or not b64_str.startswith('data:image/'):
+            continue
+        try:
+            header, data = b64_str.split(',', 1)
+            mime = header.split('/')[1].split(';')[0]
+            ext = 'jpeg' if mime == 'jpeg' else mime
+            img_data = base64.b64decode(data)
+
+            img_part = Part(
+                PackURI(f'/word/media/block_img_{i}_{id(doc)}.{ext}'),
+                f'image/{mime}',
+                img_data
+            )
+            new_rid = doc.part.relate_to(
+                img_part,
+                'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image'
+            )
+            rid_map[i] = new_rid
+        except Exception as e:
+            print(f"Ошибка добавления картинки {i}: {e}")
+
+    return rid_map
+
+
+def _update_rids_in_xml(xml_content: str, rid_map: dict) -> str:
+    """
+    Обновляет rId ссылки в XML блока.
+    rid_map: {порядковый_номер_картинки → новый_rId}
+    """
     try:
         from lxml import etree
-        NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+        REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+        DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+
         block = etree.fromstring(xml_content)
-        for numPr in list(block.iter(f'{{{NS}}}numPr')):
-            parent_pPr = numPr.getparent()
-            if parent_pPr is None:
-                continue
-            parent_pPr.remove(numPr)
-            ind = parent_pPr.find(f'{{{NS}}}ind')
-            if ind is None:
-                ind = etree.SubElement(parent_pPr, f'{{{NS}}}ind')
-            ind.set(f'{{{NS}}}left', '360')
-            para = parent_pPr.getparent()
-            if para is not None:
-                bullet_run = etree.Element(f'{{{NS}}}r')
-                bullet_t = etree.SubElement(bullet_run, f'{{{NS}}}t')
-                bullet_t.text = '• '
-                bullet_t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-                pPr_idx = list(para).index(parent_pPr)
-                para.insert(pPr_idx + 1, bullet_run)
+        blips = list(block.iter(f'{{{A_NS}}}blip'))
+
+        for i, blip in enumerate(blips):
+            if i in rid_map:
+                blip.set(f'{{{REL_NS}}}embed', rid_map[i])
+
         return etree.tostring(block, encoding='unicode')
     except Exception as e:
-        print(f"Ошибка замены нумерации: {e}")
+        print(f"Ошибка обновления rId: {e}")
         return xml_content
 
 
-def _insert_xml_block(doc, insert_after_elem, xml_content: str, block_images: list = None):
-    """Вставляет XML блок после указанного элемента."""
+def _insert_xml_block(doc, insert_after_elem, xml_content: str, rid_map: dict = None):
+    """Вставляет XML блок с правильными rId для картинок"""
     try:
         from lxml import etree
 
-        xml_content = _fix_numbering_to_bullets(xml_content)
+        # Обновляем rId если есть маппинг
+        if rid_map:
+            xml_content = _update_rids_in_xml(xml_content, rid_map)
+
         block = etree.fromstring(xml_content)
         children = list(block)
         if not children:
             return False
 
         first_type = _get_first_content_type(xml_content)
-        DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
 
-        clean_children = []
-        drawing_count = 0
-        for child in children:
-            has_drawing = (list(child.iter(f'{{{DRAW_NS}}}inline')) or
-                          list(child.iter(f'{{{DRAW_NS}}}anchor')))
-            if has_drawing:
-                drawing_count += 1
-            else:
-                clean_children.append(child)
-
-        for child in reversed(clean_children):
+        # Вставляем все элементы в обратном порядке
+        for child in reversed(children):
             child_copy = copy.deepcopy(child)
             insert_after_elem.addnext(child_copy)
 
-        if drawing_count > 0 and block_images:
-            for img_path in reversed(block_images):
-                if img_path and os.path.exists(img_path):
-                    try:
-                        try:
-                            from PIL import Image as PILImage
-                            with PILImage.open(img_path) as pil_img:
-                                orig_w, orig_h = pil_img.size
-                                dpi = pil_img.info.get('dpi', (96, 96))
-                                dpi = dpi[0] if isinstance(dpi, tuple) else dpi or 96
-                                w_cm = orig_w / dpi * 2.54
-                                h_cm = orig_h / dpi * 2.54
-                        except Exception:
-                            w_cm, h_cm = 14.0, 8.0
-                        max_w, max_h = 14.0, 10.0
-                        if w_cm > max_w:
-                            h_cm = h_cm * max_w / w_cm
-                            w_cm = max_w
-                        if h_cm > max_h:
-                            w_cm = w_cm * max_h / h_cm
-                            h_cm = max_h
-                        img_p = doc.add_paragraph()
-                        img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        run_img = img_p.add_run()
-                        run_img.add_picture(img_path, width=Cm(w_cm))
-                        insert_after_elem.addnext(img_p._element)
-                    except Exception as e:
-                        print(f"Ошибка вставки картинки блока: {e}")
-
+        # Настройка разрывов страниц
         parent = insert_after_elem.getparent()
         all_elems = list(parent)
         start_idx = all_elems.index(insert_after_elem) + 1
         if start_idx < len(all_elems):
             first_inserted = all_elems[start_idx]
             tag = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
+
             if first_type == 'table':
                 _set_cant_split_first_rows(first_inserted, rows=2)
                 anchor = OxmlElement('w:p')
@@ -245,58 +267,8 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str, block_images: li
         return False
 
 
-def _add_section_title(doc, insert_after_elem, title: str, number: int = 0):
-    """Добавляет заголовок раздела — серый фон, белый текст, шрифт 12, не отрывается от следующего"""
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-
-    # Серый фон + keepNext (не отрывать от следующего элемента)
-    pPr = p._element.get_or_add_pPr()
-    shd = OxmlElement('w:shd')
-    shd.set(qn('w:val'), 'clear')
-    shd.set(qn('w:color'), 'auto')
-    shd.set(qn('w:fill'), '595959')
-    pPr.append(shd)
-    keepNext = OxmlElement('w:keepNext')
-    pPr.append(keepNext)
-
-    display_title = f"{number}. {title}" if number else title
-    run = p.add_run(display_title)
-    run.bold = True
-    run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-    run.font.size = Pt(12)
-    run.font.name = 'Arial'
-
-    insert_after_elem.addnext(p._element)
-    return p._element
-
-
-def _add_horizontal_line(doc, insert_after_elem, keep_next=False):
-    """Добавляет горизонтальную линию на всю ширину страницы"""
-    p = doc.add_paragraph()
-    pPr = p._element.get_or_add_pPr()
-    pBdr = OxmlElement('w:pBdr')
-    bottom = OxmlElement('w:bottom')
-    bottom.set(qn('w:val'), 'single')
-    bottom.set(qn('w:sz'), '6')
-    bottom.set(qn('w:space'), '1')
-    bottom.set(qn('w:color'), '000000')
-    pBdr.append(bottom)
-    pPr.append(pBdr)
-    if keep_next:
-        kn = OxmlElement('w:keepNext')
-        pPr.append(kn)
-    # Минимальный отступ
-    spacing = OxmlElement('w:spacing')
-    spacing.set(qn('w:before'), '0')
-    spacing.set(qn('w:after'), '0')
-    pPr.append(spacing)
-    insert_after_elem.addnext(p._element)
-    return p._element
-
-
 def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
-    """Добавляет блок условий для позиции с линиями сверху и снизу"""
+    """Блок условий с линиями сверху и снизу"""
     production_time = item.get('production_time') or (eq.get('production_time') if eq else None) or '25-30 дней'
     packaging = item.get('packaging') or (eq.get('packaging') if eq else None) or 'экспортная деревянная тара (ящик)'
     delivery = item.get('delivery') or (eq.get('delivery') if eq else None) or 'до завода покупателя'
@@ -314,12 +286,11 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
     # Нижняя линия
     _add_horizontal_line(doc, insert_after_elem)
 
-    # Добавляем условия снизу вверх с keepLines
     for label, value in conditions:
         p = doc.add_paragraph()
         pPr = p._element.get_or_add_pPr()
-        keepLines = OxmlElement('w:keepLines')
-        pPr.append(keepLines)
+        kl = OxmlElement('w:keepLines')
+        pPr.append(kl)
         run_label = p.add_run(label + ' ')
         run_label.bold = True
         run_label.font.size = Pt(10)
@@ -336,10 +307,9 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
 
 
 def _add_summary_table(doc, insert_after_elem, items: list):
-    """Добавляет итоговую таблицу для нескольких позиций"""
+    """Итоговая таблица для нескольких позиций"""
     table = doc.add_table(rows=1, cols=4)
     table.style = 'Table Grid'
-
     headers = ['Оборудование', 'Кол-во', 'Цена за ед.', 'Сумма']
     for i, cell in enumerate(table.rows[0].cells):
         cell.text = headers[i]
@@ -376,95 +346,12 @@ def _add_summary_table(doc, insert_after_elem, items: list):
                 run.font.name = 'Arial'
 
     insert_after_elem.addnext(table._tbl)
-
     title_p = doc.add_paragraph()
     title_r = title_p.add_run('Итоговая стоимость')
     title_r.bold = True
     title_r.font.size = Pt(11)
     title_r.font.name = 'Arial'
     insert_after_elem.addnext(title_p._element)
-
-
-def _copy_numbering_from_source(target_doc, source_xml_path: str):
-    """Копирует нумерацию из оригинального файла в целевой документ"""
-    try:
-        import zipfile
-        from lxml import etree
-        with zipfile.ZipFile(source_xml_path, 'r') as z:
-            if 'word/numbering.xml' not in z.namelist():
-                return
-            numbering_xml = z.read('word/numbering.xml')
-
-        # Добавляем numbering в целевой документ
-        numbering_part = target_doc.part.numbering_part
-        if numbering_part is None:
-            # Создаём новый numbering part
-            from docx.opc.part import Part
-            from docx.opc.packuri import PackURI
-            from docx.oxml.ns import nsmap
-            numbering_root = etree.fromstring(numbering_xml)
-            target_doc.part._element.getroottree()
-        else:
-            # Мёрджим numbering
-            src_root = etree.fromstring(numbering_xml)
-            dst_root = numbering_part._element
-
-            # Находим максимальный abstractNumId и numId в целевом
-            NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-            existing_abstract = {int(e.get(f'{{{NS_W}}}abstractNumId', 0))
-                                 for e in dst_root.findall(f'{{{NS_W}}}abstractNum')}
-            existing_num = {int(e.get(f'{{{NS_W}}}numId', 0))
-                           for e in dst_root.findall(f'{{{NS_W}}}num')}
-
-            max_abstract = max(existing_abstract) if existing_abstract else 0
-            max_num = max(existing_num) if existing_num else 0
-
-            # Маппинг старых ID → новых
-            abstract_map = {}
-            num_map = {}
-
-            for elem in src_root.findall(f'{{{NS_W}}}abstractNum'):
-                old_id = int(elem.get(f'{{{NS_W}}}abstractNumId', 0))
-                new_id = max_abstract + old_id + 1
-                abstract_map[old_id] = new_id
-                new_elem = copy.deepcopy(elem)
-                new_elem.set(f'{{{NS_W}}}abstractNumId', str(new_id))
-                dst_root.append(new_elem)
-
-            for elem in src_root.findall(f'{{{NS_W}}}num'):
-                old_num_id = int(elem.get(f'{{{NS_W}}}numId', 0))
-                new_num_id = max_num + old_num_id + 1
-                num_map[old_num_id] = new_num_id
-                new_elem = copy.deepcopy(elem)
-                new_elem.set(f'{{{NS_W}}}numId', str(new_num_id))
-                # Обновляем ссылку на abstractNum
-                abs_ref = new_elem.find(f'{{{NS_W}}}abstractNumId')
-                if abs_ref is not None:
-                    old_abs = int(abs_ref.get(f'{{{NS_W}}}val', 0))
-                    abs_ref.set(f'{{{NS_W}}}val', str(abstract_map.get(old_abs, old_abs)))
-                dst_root.append(new_elem)
-
-            return num_map
-    except Exception as e:
-        print(f"Ошибка копирования нумерации: {e}")
-    return {}
-    """Скачивает фото с Яндекс Диска"""
-    try:
-        import requests
-        token = os.getenv('YANDEX_DISK_TOKEN')
-        headers = {'Authorization': f'OAuth {token}'}
-        r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/download',
-                         headers=headers, params={'path': photo_path})
-        if r.status_code == 200:
-            download_url = r.json().get('href')
-            if download_url:
-                img_r = requests.get(download_url)
-                with open(local_path, 'wb') as f:
-                    f.write(img_r.content)
-                return True
-    except Exception as e:
-        print(f"Ошибка скачивания фото: {e}")
-    return False
 
 
 def _download_photo(photo_path: str, local_path: str) -> bool:
@@ -474,11 +361,11 @@ def _download_photo(photo_path: str, local_path: str) -> bool:
         token = os.getenv('YANDEX_DISK_TOKEN')
         headers = {'Authorization': f'OAuth {token}'}
         r = requests.get('https://cloud-api.yandex.net/v1/disk/resources/download',
-                         headers=headers, params={'path': photo_path})
+                         headers=headers, params={'path': photo_path}, timeout=30)
         if r.status_code == 200:
             download_url = r.json().get('href')
             if download_url:
-                img_r = requests.get(download_url)
+                img_r = requests.get(download_url, timeout=30)
                 with open(local_path, 'wb') as f:
                     f.write(img_r.content)
                 return True
@@ -506,7 +393,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
         '{{KP_NUMBER}}': kp_number,
     })
 
-    # Добавляем keepLines к параграфу подписи
+    # keepLines на подпись
     for para in doc.paragraphs:
         if 'уважением' in para.text or 'Лавришко' in para.text:
             pPr = para._element.get_or_add_pPr()
@@ -518,13 +405,12 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
     if content_para is None:
         raise ValueError("Плейсхолдер {{CONTENT}} не найден в шаблоне")
 
-    # Очищаем плейсхолдер
     for run in content_para.runs:
         run.text = ''
 
     insert_after = content_para._element
 
-    # Итоговая таблица (если несколько позиций) — добавляем последней
+    # Итоговая таблица если несколько позиций
     if len(items) > 1:
         _add_summary_table(doc, insert_after, items)
 
@@ -537,36 +423,21 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
         # Условия позиции
         _add_conditions_block(doc, insert_after, item, eq)
 
-        # Блоки из библиотеки (в обратном порядке) с нумерацией
+        # Блоки из библиотеки
         total_blocks = len(blocks)
         for idx, block in enumerate(reversed(blocks)):
             block_title = block.get('block_title', '')
             xml_content = block.get('xml_content', '') or block.get('xml', '')
             block_number = total_blocks - idx
 
-            # Берём картинки из base64 (без обращения к Яндекс Диску)
-            block_images = []
+            # Добавляем картинки из base64 в документ и получаем маппинг rId
+            rid_map = {}
             images_b64 = json.loads(block.get('images_base64', '[]')) if isinstance(block.get('images_base64'), str) else (block.get('images_base64') or [])
-            for b64_str in images_b64:
-                if b64_str and b64_str.startswith('data:image/'):
-                    try:
-                        import base64 as b64mod
-                        header, data = b64_str.split(',', 1)
-                        ext = header.split('/')[1].split(';')[0]
-                        local_img = f'temp_b64_img_{kp_number}_{idx}_{len(block_images)}.{ext}'
-                        with open(local_img, 'wb') as f:
-                            f.write(b64mod.b64decode(data))
-                        block_images.append(local_img)
-                    except Exception as e:
-                        print(f"Ошибка декодирования base64 картинки: {e}")
+            if images_b64:
+                rid_map = _add_images_to_doc(doc, images_b64)
 
             if xml_content:
-                _insert_xml_block(doc, insert_after, xml_content, block_images)
-
-            # Удаляем временные файлы
-            for local_img in block_images:
-                if os.path.exists(local_img):
-                    os.remove(local_img)
+                _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
             if block_title:
                 _add_section_title(doc, insert_after, block_title, number=block_number)
@@ -577,12 +448,10 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             photo_local = f'temp_photo_{kp_number}_{model}.jpg'
             if _download_photo(photo_path, photo_local):
                 try:
-                    # Определяем размер фото
                     try:
                         from PIL import Image as PILImage
                         with PILImage.open(photo_local) as pil_img:
                             orig_w, orig_h = pil_img.size
-                        # Масштабируем: макс 14 см по ширине, макс 9 см по высоте
                         w_cm = 14.0
                         h_cm = orig_h / orig_w * w_cm
                         if h_cm > 9.0:
@@ -591,11 +460,9 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     except Exception:
                         w_cm = 12.0
 
-                    # Пустая строка после блока фото
                     space_p = doc.add_paragraph()
                     insert_after.addnext(space_p._element)
 
-                    # Сноска под фото
                     note_p = doc.add_paragraph()
                     note_r = note_p.add_run(
                         '* Фото для справки. Реальные фотографии будут предоставлены после завершения производства.')
@@ -604,7 +471,6 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     note_r.font.name = 'Arial'
                     insert_after.addnext(note_p._element)
 
-                    # Фото с keepNext
                     photo_p = doc.add_paragraph()
                     photo_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     pPr = photo_p._element.get_or_add_pPr()
@@ -619,27 +485,21 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     if os.path.exists(photo_local):
                         os.remove(photo_local)
 
-        # Заголовок оборудования (чёрная рамка)
+        # Заголовок оборудования
         name = eq['name'] if eq else item.get('name', model)
         _add_equipment_header(doc, insert_after, name)
 
-        # Разделитель между позициями
         if len(items) > 1:
             sep = doc.add_paragraph()
             insert_after.addnext(sep._element)
 
-    # Сохраняем Word
     docx_path = os.path.join(OUTPUT_DIR, f'КП_{kp_number}.docx')
     doc.save(docx_path)
-
-    # Генерируем PDF
     pdf_path = _convert_to_pdf(kp_data, kp_number)
-
     return docx_path, pdf_path
 
 
 def _convert_to_pdf(kp_data: dict, kp_number: str) -> str:
-    """Генерирует PDF через reportlab"""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import cm
@@ -686,18 +546,17 @@ def _convert_to_pdf(kp_data: dict, kp_number: str) -> str:
     story.append(Spacer(1, 0.5*cm))
     story.append(Paragraph('КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ', t))
     story.append(Spacer(1, 0.3*cm))
-    story.append(Paragraph('ООО «Фарсал» предлагает к поставке', ParagraphStyle('sub', fontName=font_bold, fontSize=12, alignment=1)))
+    story.append(Paragraph('ООО «Фарсал» предлагает к поставке',
+                           ParagraphStyle('sub', fontName=font_bold, fontSize=12, alignment=1)))
     story.append(Spacer(1, 0.3*cm))
 
     for item in items:
         model = item.get('model', '')
         eq = get_equipment_by_model(model)
         name = eq['name'] if eq else item.get('name', model)
-
         story.append(Paragraph(name, s))
         story.append(Spacer(1, 0.3*cm))
 
-        # Характеристики из БД
         if eq and eq.get('specs'):
             try:
                 specs = json.loads(eq['specs']) if isinstance(eq['specs'], str) else eq['specs']
@@ -720,7 +579,6 @@ def _convert_to_pdf(kp_data: dict, kp_number: str) -> str:
             except Exception:
                 pass
 
-        warranty = item.get('warranty') or (eq.get('warranty') if eq else None) or '1 год.'
         production_time = item.get('production_time') or (eq.get('production_time') if eq else None) or '25-30 дней'
         packaging = item.get('packaging') or (eq.get('packaging') if eq else None) or 'экспортная деревянная тара (ящик)'
         delivery = item.get('delivery') or (eq.get('delivery') if eq else None) or 'до завода покупателя'
@@ -728,14 +586,12 @@ def _convert_to_pdf(kp_data: dict, kp_number: str) -> str:
         unit_price = item.get('unit_price', 0)
         currency = item.get('currency', 'ЮАНЕЙ')
 
-        story.append(Paragraph(f'Гарантия: {warranty}', n))
         story.append(Paragraph(f'Сроки изготовления: {production_time}.', n))
         story.append(Paragraph(f'Упаковка: {packaging}.', n))
         story.append(Paragraph(f'Условия оплаты: {payment_terms}.', n))
         story.append(Paragraph(f'Цена с НДС с доставкой {delivery} за 1 шт.: {unit_price:,.0f} {currency}.', b))
         story.append(Spacer(1, 0.5*cm))
 
-    # Итоговая таблица
     if len(items) > 1:
         story.append(Paragraph('Итоговая стоимость', b))
         td = [['Оборудование', 'Кол-во', 'Цена/шт', 'Сумма']]
