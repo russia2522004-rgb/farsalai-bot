@@ -377,18 +377,14 @@ def _download_photo(photo_path: str, local_path: str) -> bool:
 
 
 def _apply_numbering_xml(doc, numbering_xml: str):
-    """Копирует numbering.xml из оригинального документа в текущий"""
+    """Заменяет numbering.xml в документе на numbering из оригинала"""
     if not numbering_xml:
         return
     try:
         from lxml import etree
-        from docx.oxml.ns import nsmap
         from docx.opc.part import Part
         from docx.opc.packuri import PackURI
 
-        src_root = etree.fromstring(numbering_xml.encode('utf-8'))
-
-        # Проверяем есть ли уже numbering part в документе
         numbering_part = doc.part.numbering_part
         if numbering_part is None:
             # Создаём новый numbering part
@@ -401,25 +397,22 @@ def _apply_numbering_xml(doc, numbering_xml: str):
                 num_part,
                 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering'
             )
+            print("Numbering part создан")
         else:
-            # Мёрджим — добавляем недостающие abstractNum и num
+            # Заменяем содержимое полностью
+            src_root = etree.fromstring(numbering_xml.encode('utf-8'))
             dst_root = numbering_part._element
             NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
-            existing_abstract = {int(e.get(f'{{{NS_W}}}abstractNumId', 0))
-                                 for e in dst_root.findall(f'{{{NS_W}}}abstractNum')}
-            existing_num = {int(e.get(f'{{{NS_W}}}numId', 0))
-                           for e in dst_root.findall(f'{{{NS_W}}}num')}
+            # Удаляем все существующие abstractNum и num
+            for child in list(dst_root):
+                dst_root.remove(child)
 
-            for elem in src_root.findall(f'{{{NS_W}}}abstractNum'):
-                aid = int(elem.get(f'{{{NS_W}}}abstractNumId', -1))
-                if aid not in existing_abstract:
-                    dst_root.append(copy.deepcopy(elem))
+            # Добавляем из оригинала
+            for elem in src_root:
+                dst_root.append(copy.deepcopy(elem))
 
-            for elem in src_root.findall(f'{{{NS_W}}}num'):
-                nid = int(elem.get(f'{{{NS_W}}}numId', -1))
-                if nid not in existing_num:
-                    dst_root.append(copy.deepcopy(elem))
+            print(f"Numbering part обновлён: {len(list(src_root))} элементов")
 
     except Exception as e:
         print(f"Ошибка применения numbering.xml: {e}")
