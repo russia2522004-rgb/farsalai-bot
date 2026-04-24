@@ -523,13 +523,16 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                         from PIL import Image as PILImage
                         with PILImage.open(photo_local) as pil_img:
                             orig_w, orig_h = pil_img.size
-                        w_cm = 14.0
+                        # Рабочая ширина страницы
+                        section = doc.sections[0]
+                        usable_w_cm = (section.page_width - section.left_margin - section.right_margin) / 360000
+                        w_cm = usable_w_cm
                         h_cm = orig_h / orig_w * w_cm
-                        if h_cm > 9.0:
-                            h_cm = 9.0
+                        if h_cm > 12.0:
+                            h_cm = 12.0
                             w_cm = orig_w / orig_h * h_cm
                     except Exception:
-                        w_cm = 12.0
+                        w_cm = 16.0
 
                     space_p = doc.add_paragraph()
                     insert_after.addnext(space_p._element)
