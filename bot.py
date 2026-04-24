@@ -628,23 +628,44 @@ def _apply_merge(existing: dict, new_data: dict, differences: dict):
     if update_fields:
         update_equipment(existing['model'], update_fields)
 
-    # Мержим XML блоки — добавляем блоки которых нет, заменяем если новый крупнее
+    # Мержим XML блоки — используем новый файл как основу порядка,
+    # дополняя старыми блоками которых в новом нет
     new_blocks = new_data.get('blocks', [])
     if new_blocks and existing.get('id'):
         old_blocks = get_equipment_blocks(existing['id'])
-        old_by_type = {b['block_type']: b for b in old_blocks}
-        result_blocks = list(old_blocks)  # начинаем со старых
 
+        # Нормализуем старые блоки в формат new_blocks (xml_content → xml, block_type → type)
+        def normalize_old(b):
+            return {
+                'type': b.get('block_type', b.get('type', '')),
+                'title': b.get('block_title', b.get('title', '')),
+                'xml': b.get('xml_content', b.get('xml', '')),
+                'images': _json.loads(b['images']) if isinstance(b.get('images'), str) else b.get('images', []),
+                'images_base64': _json.loads(b['images_base64']) if isinstance(b.get('images_base64'), str) else b.get('images_base64', []),
+            }
+
+        old_normalized = {b['block_type']: normalize_old(b) for b in old_blocks}
+        new_by_type = {b.get('type'): b for b in new_blocks}
+
+        # Строим результат: новый файл задаёт порядок и контент,
+        # старые уникальные блоки добавляем в конец
+        result_blocks = []
         for new_b in new_blocks:
             btype = new_b.get('type')
-            if btype not in old_by_type:
-                # Нового блока не было — добавляем
-                result_blocks.append(new_b)
+            if btype in old_normalized:
+                old_b = old_normalized[btype]
+                # Берём тот блок у которого XML больше
+                if len(new_b.get('xml', '')) >= len(old_b.get('xml', '')):
+                    result_blocks.append(new_b)
+                else:
+                    result_blocks.append(old_b)
             else:
-                old_b = old_by_type[btype]
-                # Заменяем если новый блок содержательнее (больше XML)
-                if len(new_b.get('xml', '')) > len(old_b.get('xml_content', '')):
-                    result_blocks = [new_b if b['block_type'] == btype else b for b in result_blocks]
+                result_blocks.append(new_b)
+
+        # Добавляем старые блоки которых нет в новом файле
+        for btype, old_b in old_normalized.items():
+            if btype not in new_by_type:
+                result_blocks.append(old_b)
 
         save_equipment_blocks(existing['id'], result_blocks)
 
