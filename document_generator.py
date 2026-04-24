@@ -502,17 +502,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
             if block_title:
-                # Заголовок раздела с пустой строкой перед ним
                 _add_section_title(doc, insert_after, block_title, number=block_number)
-                spacer = doc.add_paragraph()
-                pPr = spacer._element.get_or_add_pPr()
-                spacing = OxmlElement('w:spacing')
-                spacing.set(qn('w:before'), '0')
-                spacing.set(qn('w:after'), '80')
-                pPr.append(spacing)
-                kn = OxmlElement('w:keepNext')
-                pPr.append(kn)
-                insert_after.addnext(spacer._element)
 
         # Фото оборудования
         if eq and eq.get('photo_path'):
