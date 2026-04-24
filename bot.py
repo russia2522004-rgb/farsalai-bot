@@ -604,6 +604,51 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(local_path)
 
 
+def _apply_merge(existing: dict, new_data: dict, differences: dict):
+    """Применяет merge: дополняет БД новыми данными, конфликты не трогает."""
+    import json as _json
+    from database import update_equipment, get_equipment_blocks, save_equipment_blocks
+
+    update_fields = {}
+
+    # Добавляем недостающие скалярные поля
+    for field, val in differences.get('fields_to_add', {}).items():
+        update_fields[field] = val
+
+    # Мержим specs — добавляем новые характеристики к существующим
+    if differences.get('specs_to_add'):
+        old_specs_raw = existing.get('specs', '[]')
+        try:
+            old_specs = _json.loads(old_specs_raw) if isinstance(old_specs_raw, str) else (old_specs_raw or [])
+        except Exception:
+            old_specs = []
+        merged_specs = old_specs + differences['specs_to_add']
+        update_fields['specs'] = _json.dumps(merged_specs, ensure_ascii=False)
+
+    if update_fields:
+        update_equipment(existing['model'], update_fields)
+
+    # Мержим XML блоки — добавляем блоки которых нет, заменяем если новый крупнее
+    new_blocks = new_data.get('blocks', [])
+    if new_blocks and existing.get('id'):
+        old_blocks = get_equipment_blocks(existing['id'])
+        old_by_type = {b['block_type']: b for b in old_blocks}
+        result_blocks = list(old_blocks)  # начинаем со старых
+
+        for new_b in new_blocks:
+            btype = new_b.get('type')
+            if btype not in old_by_type:
+                # Нового блока не было — добавляем
+                result_blocks.append(new_b)
+            else:
+                old_b = old_by_type[btype]
+                # Заменяем если новый блок содержательнее (больше XML)
+                if len(new_b.get('xml', '')) > len(old_b.get('xml_content', '')):
+                    result_blocks = [new_b if b['block_type'] == btype else b for b in result_blocks]
+
+        save_equipment_blocks(existing['id'], result_blocks)
+
+
 async def process_next_equipment(update, context, session):
     """Обрабатывает следующую позицию из очереди"""
     queue = session.get('equipment_queue', [])
@@ -661,11 +706,11 @@ async def process_next_equipment(update, context, session):
         )
 
     else:
-        # Сравниваем с существующим
+        # Оборудование уже есть — сравниваем и мержим
         differences = compare_equipment(existing, eq_data)
 
-        if not differences['has_changes']:
-            # Вариация 2 — нет изменений, пропускаем автоматически
+        if not differences['has_conflicts'] and not differences['has_additions']:
+            # Ничего нового и никаких конфликтов — пропускаем
             await update.message.reply_text(
                 f'⏭ *{eq_data.get("name")}* [{idx+1}/{len(queue)}] — уже есть в библиотеке, изменений нет. Пропущено.',
                 parse_mode='Markdown'
@@ -673,58 +718,75 @@ async def process_next_equipment(update, context, session):
             session['equipment_queue_idx'] = idx + 1
             await process_next_equipment(update, context, session)
 
-        elif differences['price_changed'] and not differences['specs_changed']:
-            # Вариация 4 — только цена изменилась
-            pc = differences['price_changed']
-            text = (
-                f'💰 *{eq_data.get("name")}* [{idx+1}/{len(queue)}]\n\n'
-                f'Цена изменилась:\n'
-                f'Было: {pc["old"]:,.0f} {pc["currency"]}\n'
-                f'Стало: {pc["new"]:,.0f} {pc["currency"]}\n\n'
-                f'Обновить цену?'
-            )
-            session['pending_equipment'] = eq_data
-            session['existing_equipment'] = existing
-            session['equipment_action'] = 'price_only'
-            keyboard = [['✅ Обновить цену', '⏭ Оставить старую']]
+        elif differences['has_additions'] and not differences['has_conflicts']:
+            # Только дополнения — применяем автоматически
+            add_lines = []
+            for field, val in differences['fields_to_add'].items():
+                add_lines.append(f"• {field}: {val}")
+            for spec in differences['specs_to_add']:
+                add_lines.append(f"• {spec['name']}: {spec['value']}")
+
+            # Применяем merge
+            await _apply_merge(existing, eq_data, differences)
+
             await update.message.reply_text(
-                text,
-                parse_mode='Markdown',
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+                f'✅ *{eq_data.get("name")}* [{idx+1}/{len(queue)}] — дополнено:\n' +
+                '\n'.join(add_lines),
+                parse_mode='Markdown'
             )
+            session['equipment_queue_idx'] = idx + 1
+            await process_next_equipment(update, context, session)
 
         else:
-            # Вариация 3 — характеристики отличаются
-            diff_lines = []
-            for d in differences['specs_changed'][:5]:
-                if d['type'] == 'changed':
-                    diff_lines.append(f"• {d['name']}: {d['old']} → {d['new']}")
-                elif d['type'] == 'added':
-                    diff_lines.append(f"• {d['name']}: нет → {d['new']} (новая)")
-                elif d['type'] == 'removed':
-                    diff_lines.append(f"• {d['name']}: {d['old']} → нет (удалена)")
+            # Есть конфликты — показываем менеджеру
+            lines = []
 
-            if len(differences['specs_changed']) > 5:
-                diff_lines.append(f"• ...ещё {len(differences['specs_changed']) - 5} изменений")
+            # Сначала дополнения (информационно)
+            if differences['has_additions']:
+                lines.append('*Будет добавлено автоматически:*')
+                for field, val in differences['fields_to_add'].items():
+                    lines.append(f"  ✅ {field}: {val}")
+                for spec in differences['specs_to_add']:
+                    lines.append(f"  ✅ {spec['name']}: {spec['value']}")
+                lines.append('')
 
-            if differences['price_changed']:
-                pc = differences['price_changed']
-                diff_lines.insert(0, f"• Цена: {pc['old']:,.0f} → {pc['new']:,.0f} {pc['currency']}")
+            # Конфликты по полям
+            if differences['fields_conflict']:
+                lines.append('*Конфликты — нужно выбрать:*')
+                for c in differences['fields_conflict']:
+                    field_name = {
+                        'base_price': 'Цена', 'currency': 'Валюта',
+                        'warranty': 'Гарантия', 'production_time': 'Срок',
+                        'packaging': 'Упаковка', 'delivery': 'Доставка',
+                        'payment_terms': 'Оплата'
+                    }.get(c['field'], c['field'])
+                    lines.append(f"  ⚠️ {field_name}:")
+                    lines.append(f"    Было: {c['old']}")
+                    lines.append(f"    Стало: {c['new']}")
 
-            text = (
-                f'⚠️ *{eq_data.get("name")}* [{idx+1}/{len(queue)}]\n\n'
-                f'Найдены отличия:\n' +
-                '\n'.join(diff_lines) +
-                '\n\nЧто сделать? Напишите или надиктуйте:\n'
-                '— "обновить всё" — взять все данные из нового файла\n'
-                '— "оставить старое" — не менять ничего\n'
-                '— или опишите что именно оставить/обновить'
-            )
+            # Конфликты по характеристикам
+            if differences['specs_conflict']:
+                if not differences['fields_conflict']:
+                    lines.append('*Конфликты — нужно выбрать:*')
+                for sc in differences['specs_conflict'][:5]:
+                    lines.append(f"  ⚠️ {sc['name']}:")
+                    lines.append(f"    Было: {sc['old']}")
+                    lines.append(f"    Стало: {sc['new']}")
+                if len(differences['specs_conflict']) > 5:
+                    lines.append(f"  ...ещё {len(differences['specs_conflict']) - 5} конфликтов")
+
+            lines.append('\nЧто сделать с конфликтами?')
+
             session['pending_equipment'] = eq_data
             session['existing_equipment'] = existing
             session['equipment_differences'] = differences
             session['equipment_action'] = 'conflict'
-            await update.message.reply_text(text, parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
+            keyboard = [['✅ Взять новые', '⏭ Оставить старые'], ['🔀 Применить дополнения, старые оставить']]
+            await update.message.reply_text(
+                f'⚠️ *{eq_data.get("name")}* [{idx+1}/{len(queue)}]\n\n' + '\n'.join(lines),
+                parse_mode='Markdown',
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
 
 
 async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -792,36 +854,32 @@ async def confirm_add_equipment(update: Update, context: ContextTypes.DEFAULT_TY
         session['equipment_queue_idx'] = idx + 1
         await process_next_equipment(update, context, session)
 
-    elif action == 'price_only':
-        if text in ['✅ Обновить цену']:
-            eq_data = session.get('pending_equipment', {})
-            update_equipment(eq_data.get('model'), {
-                'base_price': eq_data.get('base_price'),
-                'currency': eq_data.get('currency'),
-            })
-            await update.message.reply_text('✅ Цена обновлена!', parse_mode='Markdown')
-        else:
-            await update.message.reply_text('⏭ Цена не изменена.')
-
-        session['equipment_queue_idx'] = idx + 1
-        await process_next_equipment(update, context, session)
-
     elif action == 'conflict':
-        # Голосовое/текстовое разрешение конфликта
         existing = session.get('existing_equipment', {})
         new_data = session.get('pending_equipment', {})
         differences = session.get('equipment_differences', {})
 
-        if text.lower() in ['обновить всё', 'обновить все', 'обновить']:
-            # Берём все данные из нового файла
-            if isinstance(new_data.get('specs'), list):
-                new_data['specs'] = json.dumps(new_data['specs'], ensure_ascii=False)
-            add_equipment(new_data)
-            await update.message.reply_text('✅ Данные полностью обновлены!')
-        elif text.lower() in ['оставить старое', 'оставить', 'не менять']:
-            await update.message.reply_text('⏭ Оставлены старые данные.')
+        if text in ['✅ Взять новые', 'взять новые', 'обновить всё', 'обновить все']:
+            # Берём конфликтные поля из нового файла + все дополнения
+            update_fields = {}
+            for c in differences.get('fields_conflict', []):
+                update_fields[c['field']] = c['new']
+            # Применяем merge (дополнения + новые конфликтные значения)
+            _apply_merge(existing, new_data, differences)
+            if update_fields:
+                update_equipment(existing['model'], update_fields)
+            await update.message.reply_text('✅ Данные обновлены — взяты новые значения.')
+
+        elif text in ['🔀 Применить дополнения, старые оставить', 'дополнить', 'применить дополнения']:
+            # Только дополнения, конфликтные поля не трогаем
+            _apply_merge(existing, new_data, differences)
+            await update.message.reply_text('✅ Дополнения применены, конфликтные поля не изменены.')
+
+        elif text in ['⏭ Оставить старые', 'оставить старое', 'оставить', 'не менять']:
+            await update.message.reply_text('⏭ Данные не изменены.')
+
         else:
-            # Claude разрешает конфликт по инструкции
+            # Свободный текст — Claude разрешает конфликт
             await update.message.reply_text('🤖 Применяю инструкцию...')
             resolved = resolve_equipment_conflict(existing, new_data, differences, text)
             if isinstance(resolved.get('specs'), list):

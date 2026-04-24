@@ -382,30 +382,77 @@ def extract_equipment_from_doc(doc_text: str) -> dict:
 
 
 def compare_equipment(existing: dict, new_data: dict) -> dict:
+    """
+    Сравнивает существующее оборудование с новыми данными.
+    Логика: дополнять новыми данными, при конфликте — спрашивать.
+    """
     differences = {
-        'specs_changed': [],
-        'price_changed': None,
-        'conditions_changed': [],
-        'has_changes': False
+        'fields_to_add': {},       # поля которых нет в БД — добавить автоматически
+        'fields_conflict': [],     # поля которые отличаются — спросить менеджера
+        'specs_to_add': [],        # характеристики которых нет в БД
+        'specs_conflict': [],      # характеристики которые отличаются
+        'has_conflicts': False,    # есть ли конфликты требующие решения
+        'has_additions': False,    # есть ли что добавить автоматически
     }
 
-    old_price = existing.get('base_price')
-    new_price = new_data.get('base_price')
-    if old_price and new_price and abs(float(old_price) - float(new_price)) > 0.01:
-        differences['price_changed'] = {
-            'old': old_price, 'new': new_price,
-            'currency': new_data.get('currency', existing.get('currency', ''))
-        }
-        differences['has_changes'] = True
+    # Сравниваем скалярные поля
+    for field in ['base_price', 'currency', 'warranty', 'production_time', 'packaging', 'delivery', 'payment_terms']:
+        old_val = existing.get(field)
+        new_val = new_data.get(field)
 
-    for field in ['warranty', 'production_time', 'packaging', 'delivery', 'payment_terms']:
-        old_val = existing.get(field, '')
-        new_val = new_data.get(field, '')
-        if old_val and new_val and str(old_val).strip() != str(new_val).strip():
-            differences['conditions_changed'].append(
-                {'field': field, 'old': old_val, 'new': new_val}
-            )
-            differences['has_changes'] = True
+        if not new_val:
+            continue  # в новом файле нет — игнорируем
+
+        if not old_val:
+            # В БД пусто — добавляем автоматически
+            differences['fields_to_add'][field] = new_val
+            differences['has_additions'] = True
+        elif field == 'base_price':
+            if abs(float(old_val) - float(new_val)) > 0.01:
+                differences['fields_conflict'].append({
+                    'field': field,
+                    'old': old_val, 'new': new_val,
+                    'currency': new_data.get('currency', existing.get('currency', ''))
+                })
+                differences['has_conflicts'] = True
+        else:
+            if str(old_val).strip() != str(new_val).strip():
+                differences['fields_conflict'].append({
+                    'field': field,
+                    'old': old_val, 'new': new_val
+                })
+                differences['has_conflicts'] = True
+
+    # Сравниваем specs (список характеристик)
+    old_specs_raw = existing.get('specs', '[]')
+    new_specs_raw = new_data.get('specs', [])
+
+    try:
+        old_specs = json.loads(old_specs_raw) if isinstance(old_specs_raw, str) else (old_specs_raw or [])
+    except Exception:
+        old_specs = []
+
+    new_specs = new_specs_raw if isinstance(new_specs_raw, list) else []
+
+    old_map = {s['name'].strip().lower(): s['value'] for s in old_specs if isinstance(s, dict) and 'name' in s}
+
+    for spec in new_specs:
+        if not isinstance(spec, dict) or 'name' not in spec:
+            continue
+        key = spec['name'].strip().lower()
+        new_val = spec.get('value', '')
+        if key not in old_map:
+            # Новая характеристика — добавить
+            differences['specs_to_add'].append(spec)
+            differences['has_additions'] = True
+        elif str(old_map[key]).strip() != str(new_val).strip():
+            # Значение отличается — конфликт
+            differences['specs_conflict'].append({
+                'name': spec['name'],
+                'old': old_map[key],
+                'new': new_val
+            })
+            differences['has_conflicts'] = True
 
     return differences
 
