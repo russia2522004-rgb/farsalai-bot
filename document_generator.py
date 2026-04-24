@@ -137,6 +137,22 @@ def _set_cant_split_first_rows(tbl_elem, rows=2):
             trPr.append(tblHeader)
 
 
+def _set_cant_split_all_rows(tbl_elem):
+    """Запрещает разрывать ВСЕ строки таблицы страницей"""
+    tr_list = tbl_elem.findall(f'{{{NS}}}tr')
+    for i, tr in enumerate(tr_list):
+        trPr = tr.find(f'{{{NS}}}trPr')
+        if trPr is None:
+            trPr = OxmlElement('w:trPr')
+            tr.insert(0, trPr)
+        cantSplit = OxmlElement('w:cantSplit')
+        trPr.append(cantSplit)
+        if i == 0:
+            tblHeader = OxmlElement('w:tblHeader')
+            trPr.append(tblHeader)
+
+
+
 def _get_first_content_type(xml_content: str) -> str:
     """Определяет тип первого значимого элемента в блоке"""
     try:
@@ -246,7 +262,7 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str, rid_map: dict = 
             tag = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
 
             if first_type == 'table':
-                _set_cant_split_first_rows(first_inserted, rows=2)
+                _set_cant_split_all_rows(first_inserted)
                 anchor = OxmlElement('w:p')
                 anchorPr = OxmlElement('w:pPr')
                 kn = OxmlElement('w:keepNext')
@@ -486,7 +502,17 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
             if block_title:
+                # Заголовок раздела с пустой строкой перед ним
                 _add_section_title(doc, insert_after, block_title, number=block_number)
+                spacer = doc.add_paragraph()
+                pPr = spacer._element.get_or_add_pPr()
+                spacing = OxmlElement('w:spacing')
+                spacing.set(qn('w:before'), '0')
+                spacing.set(qn('w:after'), '80')
+                pPr.append(spacing)
+                kn = OxmlElement('w:keepNext')
+                pPr.append(kn)
+                insert_after.addnext(spacer._element)
 
         # Фото оборудования
         if eq and eq.get('photo_path'):
