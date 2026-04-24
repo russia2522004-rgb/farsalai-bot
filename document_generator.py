@@ -148,6 +148,7 @@ def _set_cant_split_all_rows(tbl_elem):
         cantSplit = OxmlElement('w:cantSplit')
         trPr.append(cantSplit)
         if i == 0:
+            # tblHeader только на первой строке (шапка колонок)
             tblHeader = OxmlElement('w:tblHeader')
             trPr.append(tblHeader)
 
@@ -262,6 +263,14 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str, rid_map: dict = 
             tag = first_inserted.tag.split('}')[-1] if '}' in first_inserted.tag else first_inserted.tag
 
             if first_type == 'table':
+                # Убираем tblHeader со всех строк кроме первой (иначе Word повторяет их на новой странице)
+                tr_list = first_inserted.findall(f'{{{NS}}}tr')
+                for i, tr in enumerate(tr_list):
+                    if i > 0:
+                        trPr = tr.find(f'{{{NS}}}trPr')
+                        if trPr is not None:
+                            for th in trPr.findall(f'{{{NS}}}tblHeader'):
+                                trPr.remove(th)
                 _set_cant_split_all_rows(first_inserted)
                 anchor = OxmlElement('w:p')
                 anchorPr = OxmlElement('w:pPr')
