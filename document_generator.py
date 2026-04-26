@@ -536,6 +536,16 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             if xml_content:
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
+                # Если после вставки две таблицы идут подряд — добавляем пустой параграф между ними
+                body = doc.element.body
+                elems = list(body)
+                for j in range(len(elems) - 1):
+                    t1 = elems[j].tag.split('}')[-1]
+                    t2 = elems[j+1].tag.split('}')[-1]
+                    if t1 == 'tbl' and t2 == 'tbl':
+                        spacer = OxmlElement('w:p')
+                        elems[j].addnext(spacer)
+
             if block_title:
                 _add_section_title(doc, insert_after, block_title, number=block_number)
 
