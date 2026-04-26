@@ -175,15 +175,19 @@ def _get_first_content_type(xml_content: str) -> str:
     return 'text'
 
 
-def _add_images_to_doc(doc, images_b64: list) -> dict:
+def _add_images_to_doc(doc, images_b64: list, orig_rids: list = None) -> dict:
     """
     Добавляет картинки из base64 в документ как relationships.
-    Возвращает маппинг порядкового номера → новый rId.
+    orig_rids: оригинальные rId из XML блока (в том же порядке что images_b64).
+    Возвращает {orig_rId → new_rId} если orig_rids передан, иначе {index → new_rId}.
     """
     from docx.opc.part import Part
     from docx.opc.packuri import PackURI
+    import uuid
 
     rid_map = {}
+    added_hashes = {}  # hash(img_data) → new_rid, чтобы не дублировать одинаковые картинки
+
     for i, b64_str in enumerate(images_b64):
         if not b64_str or not b64_str.startswith('data:image/'):
             continue
@@ -193,16 +197,26 @@ def _add_images_to_doc(doc, images_b64: list) -> dict:
             ext = 'jpeg' if mime == 'jpeg' else mime
             img_data = base64.b64decode(data)
 
-            img_part = Part(
-                PackURI(f'/word/media/block_img_{i}_{id(doc)}.{ext}'),
-                f'image/{mime}',
-                img_data
-            )
-            new_rid = doc.part.relate_to(
-                img_part,
-                'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image'
-            )
-            rid_map[i] = new_rid
+            img_hash = hash(img_data)
+            if img_hash in added_hashes:
+                new_rid = added_hashes[img_hash]
+            else:
+                unique_name = f'block_img_{uuid.uuid4().hex}.{ext}'
+                img_part = Part(
+                    PackURI(f'/word/media/{unique_name}'),
+                    f'image/{mime}',
+                    img_data
+                )
+                new_rid = doc.part.relate_to(
+                    img_part,
+                    'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image'
+                )
+                added_hashes[img_hash] = new_rid
+
+            # Ключ: оригинальный rId если передан, иначе порядковый номер
+            key = orig_rids[i] if orig_rids and i < len(orig_rids) else i
+            rid_map[key] = new_rid
+
         except Exception as e:
             print(f"Ошибка добавления картинки {i}: {e}")
 
@@ -212,19 +226,22 @@ def _add_images_to_doc(doc, images_b64: list) -> dict:
 def _update_rids_in_xml(xml_content: str, rid_map: dict) -> str:
     """
     Обновляет rId ссылки в XML блока.
-    rid_map: {порядковый_номер_картинки → новый_rId}
+    rid_map: {orig_rId → new_rId} или {index → new_rId}
     """
     try:
         from lxml import etree
         A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
         REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-        DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
 
         block = etree.fromstring(xml_content)
         blips = list(block.iter(f'{{{A_NS}}}blip'))
 
         for i, blip in enumerate(blips):
-            if i in rid_map:
+            orig_rid = blip.get(f'{{{REL_NS}}}embed')
+            # Сначала пробуем по оригинальному rId, потом по индексу
+            if orig_rid in rid_map:
+                blip.set(f'{{{REL_NS}}}embed', rid_map[orig_rid])
+            elif i in rid_map:
                 blip.set(f'{{{REL_NS}}}embed', rid_map[i])
 
         return etree.tostring(block, encoding='unicode')
@@ -504,8 +521,17 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             # Добавляем картинки из base64 в документ и получаем маппинг rId
             rid_map = {}
             images_b64 = json.loads(block.get('images_base64', '[]')) if isinstance(block.get('images_base64'), str) else (block.get('images_base64') or [])
-            if images_b64:
-                rid_map = _add_images_to_doc(doc, images_b64)
+            if images_b64 and xml_content:
+                # Извлекаем оригинальные rId из XML блока
+                try:
+                    from lxml import etree as _etree
+                    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+                    REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+                    _root = _etree.fromstring(xml_content)
+                    orig_rids = [b.get(f'{{{REL_NS}}}embed') for b in _root.iter(f'{{{A_NS}}}blip')]
+                except Exception:
+                    orig_rids = None
+                rid_map = _add_images_to_doc(doc, images_b64, orig_rids)
 
             if xml_content:
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
