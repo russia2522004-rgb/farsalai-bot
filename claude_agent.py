@@ -18,6 +18,7 @@ SECTION_HEADERS = {
     'габаритный чертеж': 'drawing',
     'назначение оборудования': 'purpose',
     'назначение': 'purpose',
+    'фото оборудования': 'photo',
     'конструкция насоса': 'design',
     'комплект поставки': 'supply',
     'дополнительные опции': 'options',
@@ -249,6 +250,12 @@ def extract_blocks_from_docx(doc_path: str) -> list:
     blocks = []
     current_block = None
     current_elements = []
+    pre_section_elements = []  # элементы ДО первого заголовка раздела
+
+    DRAW_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+
+    def _has_image(elem):
+        return bool(list(elem.iter(f'{{{DRAW_NS}}}inline')) or list(elem.iter(f'{{{DRAW_NS}}}anchor')))
 
     for elem in elements:
         tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
@@ -258,6 +265,21 @@ def extract_blocks_from_docx(doc_path: str) -> list:
         block_type, block_title = _is_section_header(elem)
 
         if block_type:
+            # Перед первым разделом — если были фото, сохраняем как блок 'photo'
+            if current_block is None and pre_section_elements:
+                photo_elems = [e for e in pre_section_elements if _has_image(e)]
+                if photo_elems:
+                    wrapper = et.Element('block')
+                    for e in photo_elems:
+                        wrapper.append(copy.deepcopy(e))
+                    images_b64 = get_block_images_base64(photo_elems)
+                    blocks.append({
+                        'type': 'photo',
+                        'title': 'Фото оборудования',
+                        'xml': et.tostring(wrapper, encoding='unicode'),
+                        'images': [], 'images_base64': images_b64
+                    })
+
             # Сохраняем предыдущий блок
             if current_block and current_elements:
                 wrapper = et.Element('block')
@@ -272,6 +294,10 @@ def extract_blocks_from_docx(doc_path: str) -> list:
                 })
             current_block = {'type': block_type, 'title': block_title}
             current_elements = []
+
+        elif current_block is None:
+            # До первого заголовка — собираем все элементы (параграфы и таблицы)
+            pre_section_elements.append(elem)
 
         elif current_block:
             if _is_conditions_element(elem):

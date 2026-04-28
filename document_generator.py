@@ -512,11 +512,17 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             _apply_numbering_xml(doc, eq['numbering_xml'])
 
         # Блоки из библиотеки
-        total_blocks = len(blocks)
+        total_blocks = sum(1 for b in blocks if b.get('block_type', b.get('type', '')) != 'photo')
+        numbered_idx = 0
         for idx, block in enumerate(reversed(blocks)):
             block_title = block.get('block_title', '')
+            block_type = block.get('block_type', block.get('type', ''))
             xml_content = block.get('xml_content', '') or block.get('xml', '')
-            block_number = total_blocks - idx
+            if block_type != 'photo':
+                block_number = total_blocks - numbered_idx
+                numbered_idx += 1
+            else:
+                block_number = None
 
             # Добавляем картинки из base64 в документ и получаем маппинг rId
             rid_map = {}
@@ -546,7 +552,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                         spacer = OxmlElement('w:p')
                         elems[j].addnext(spacer)
 
-            if block_title:
+            if block_title and block_type != 'photo':
                 _add_section_title(doc, insert_after, block_title, number=block_number)
 
         # Фото оборудования
