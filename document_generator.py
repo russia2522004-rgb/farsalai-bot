@@ -556,7 +556,12 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                 _add_section_title(doc, insert_after, block_title, number=block_number)
 
         # Фото оборудования
-        if eq and eq.get('photo_path'):
+        # Фото оборудования — только если нет блока 'photo' в библиотеке
+        has_photo_block = any(
+            b.get('block_type', b.get('type', '')) == 'photo'
+            for b in blocks
+        )
+        if eq and eq.get('photo_path') and not has_photo_block:
             photo_path = eq['photo_path']
             photo_local = f'temp_photo_{kp_number}_{model}.jpg'
             if _download_photo(photo_path, photo_local):
