@@ -327,7 +327,7 @@ def generate_kp_number(equipment_models: list) -> str:
     row = c.fetchone()
     count = (row[0] if row else 0) + 1
     conn.close()
-    model_part = equipment_models[0].replace('-', '') if equipment_models else 'KP'
+    model_part = equipment_models[0].replace('-', '') if equipment_models and equipment_models[0] else 'KP'
     return f"{model_part}-{count:03d}"
 
 
