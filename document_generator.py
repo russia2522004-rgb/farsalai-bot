@@ -542,6 +542,10 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             if xml_content:
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
+                # Пустая строка после блока контента
+                spacer = OxmlElement('w:p')
+                insert_after.addnext(spacer)
+
                 # Если после вставки две таблицы идут подряд — добавляем пустой параграф между ними
                 body = doc.element.body
                 elems = list(body)
@@ -553,9 +557,6 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                         elems[j].addnext(spacer2)
 
             if block_title and block_type != 'photo':
-                # Пустая строка перед заголовком раздела
-                spacer = OxmlElement('w:p')
-                insert_after.addnext(spacer)
                 _add_section_title(doc, insert_after, block_title, number=block_number)
 
         # Фото оборудования
