@@ -249,6 +249,7 @@ def _strip_leading_empty_paragraphs(xml_content: str) -> str:
 
 
 
+def _update_rids_in_xml(xml_content: str, rid_map: dict) -> str:
     """
     Обновляет rId ссылки в XML блока.
     rid_map: {orig_rId → new_rId} или {index → new_rId}
