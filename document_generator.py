@@ -224,23 +224,25 @@ def _add_images_to_doc(doc, images_b64: list, orig_rids: list = None) -> dict:
 
 
 def _strip_leading_empty_paragraphs(xml_content: str) -> str:
-    """Убирает пустые параграфы в начале XML блока."""
+    """Убирает пустые параграфы в начале XML блока (без картинок)."""
     try:
         from lxml import etree
-        NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        NS_DRAW = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
         root = etree.fromstring(xml_content)
-        children = list(root)
-        for child in children:
+        for child in list(root):
             tag = child.tag.split('}')[-1]
-            if tag == 'p':
-                text = ''.join(t.text or '' for t in child.iter(f'{{{NS}}}t'))
-                has_img = child.find('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}inline') is not None
-                if not text.strip() and not has_img:
-                    root.remove(child)
-                else:
-                    break
+            if tag != 'p':
+                break  # таблица или другой элемент — не трогаем
+            text = ''.join(t.text or '' for t in child.iter(f'{{{NS_W}}}t'))
+            has_img = (
+                child.find(f'.//{{{NS_DRAW}}}inline') is not None or
+                child.find(f'.//{{{NS_DRAW}}}anchor') is not None
+            )
+            if not text.strip() and not has_img:
+                root.remove(child)
             else:
-                break
+                break  # первый непустой параграф — останавливаемся
         return etree.tostring(root, encoding='unicode')
     except Exception:
         return xml_content
@@ -516,6 +518,22 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
         run.text = ''
 
     insert_after = content_para._element
+
+    # Убираем пустые параграфы сразу после {{CONTENT}} в шаблоне
+    NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    next_elem = insert_after.getnext()
+    while next_elem is not None:
+        tag = next_elem.tag.split('}')[-1]
+        if tag == 'p':
+            text = ''.join(t.text or '' for t in next_elem.iter(f'{{{NS_W}}}t'))
+            if not text.strip():
+                to_remove = next_elem
+                next_elem = next_elem.getnext()
+                to_remove.getparent().remove(to_remove)
+            else:
+                break
+        else:
+            break
 
     # Итоговая таблица если несколько позиций
     if len(items) > 1:
