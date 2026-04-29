@@ -542,18 +542,15 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             if xml_content:
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
-                # После блока фото — разрыв страницы
-                if block_type == 'photo':
-                    pb = OxmlElement('w:p')
-                    pPr = OxmlElement('w:pPr')
-                    pageBreak = OxmlElement('w:pageBreak')
-                    r = OxmlElement('w:r')
-                    r.append(pageBreak)
-                    pb.append(pPr)
-                    pb.append(r)
-                    insert_after.addnext(pb)
-
                 # Если после вставки две таблицы идут подряд — добавляем пустой параграф между ними
+                body = doc.element.body
+                elems = list(body)
+                for j in range(len(elems) - 1):
+                    t1 = elems[j].tag.split('}')[-1]
+                    t2 = elems[j+1].tag.split('}')[-1]
+                    if t1 == 'tbl' and t2 == 'tbl':
+                        spacer2 = OxmlElement('w:p')
+                        elems[j].addnext(spacer2)
                 body = doc.element.body
                 elems = list(body)
                 for j in range(len(elems) - 1):
@@ -569,7 +566,33 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                 insert_after.addnext(spacer)
                 _add_section_title(doc, insert_after, block_title, number=block_number)
 
-        # Фото оборудования
+        # Разрыв страницы после фото (если есть блок photo или photo_path)
+        # Ищем последний элемент с картинкой до первого заголовка раздела
+        has_photo_block = any(b.get('block_type', b.get('type', '')) == 'photo' for b in blocks)
+        has_single_photo = eq and eq.get('photo_path') and not has_photo_block
+
+        if has_photo_block or has_single_photo:
+            body_elems = list(doc.element.body)
+            DRAW_NS_L = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+            last_photo_elem = None
+            for elem in body_elems:
+                tag = elem.tag.split('}')[-1]
+                has_img = bool(list(elem.iter(f'{{{DRAW_NS_L}}}inline')) or list(elem.iter(f'{{{DRAW_NS_L}}}anchor')))
+                # Останавливаемся на первом заголовке раздела (нумерованный параграф)
+                text = ''.join(t.text or '' for t in elem.iter(f'{{{NS}}}t'))
+                if text.strip() and text.strip()[0].isdigit() and '. ' in text:
+                    break
+                if has_img:
+                    last_photo_elem = elem
+            if last_photo_elem is not None:
+                pb = OxmlElement('w:p')
+                r = OxmlElement('w:r')
+                br = OxmlElement('w:br')
+                br.set(qn('w:type'), 'page')
+                r.append(br)
+                pb.append(r)
+                last_photo_elem.addnext(pb)
+
         # Фото оборудования — только если нет блока 'photo' в библиотеке
         has_photo_block = any(
             b.get('block_type', b.get('type', '')) == 'photo'
@@ -614,15 +637,6 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     run_photo = photo_p.add_run()
                     run_photo.add_picture(photo_local, width=Cm(w_cm))
                     insert_after.addnext(photo_p._element)
-
-                    # Разрыв страницы после фото
-                    pb = OxmlElement('w:p')
-                    r = OxmlElement('w:r')
-                    br = OxmlElement('w:br')
-                    br.set(qn('w:type'), 'page')
-                    r.append(br)
-                    pb.append(r)
-                    insert_after.addnext(pb)
                 except Exception as e:
                     print(f"Ошибка вставки фото: {e}")
                 finally:
