@@ -542,6 +542,17 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             if xml_content:
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
+                # После блока фото — разрыв страницы
+                if block_type == 'photo':
+                    pb = OxmlElement('w:p')
+                    pPr = OxmlElement('w:pPr')
+                    pageBreak = OxmlElement('w:pageBreak')
+                    r = OxmlElement('w:r')
+                    r.append(pageBreak)
+                    pb.append(pPr)
+                    pb.append(r)
+                    insert_after.addnext(pb)
+
                 # Если после вставки две таблицы идут подряд — добавляем пустой параграф между ними
                 body = doc.element.body
                 elems = list(body)
@@ -549,10 +560,13 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     t1 = elems[j].tag.split('}')[-1]
                     t2 = elems[j+1].tag.split('}')[-1]
                     if t1 == 'tbl' and t2 == 'tbl':
-                        spacer = OxmlElement('w:p')
-                        elems[j].addnext(spacer)
+                        spacer2 = OxmlElement('w:p')
+                        elems[j].addnext(spacer2)
 
             if block_title and block_type != 'photo':
+                # Пустая строка перед заголовком раздела
+                spacer = OxmlElement('w:p')
+                insert_after.addnext(spacer)
                 _add_section_title(doc, insert_after, block_title, number=block_number)
 
         # Фото оборудования
@@ -600,6 +614,15 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     run_photo = photo_p.add_run()
                     run_photo.add_picture(photo_local, width=Cm(w_cm))
                     insert_after.addnext(photo_p._element)
+
+                    # Разрыв страницы после фото
+                    pb = OxmlElement('w:p')
+                    r = OxmlElement('w:r')
+                    br = OxmlElement('w:br')
+                    br.set(qn('w:type'), 'page')
+                    r.append(br)
+                    pb.append(r)
+                    insert_after.addnext(pb)
                 except Exception as e:
                     print(f"Ошибка вставки фото: {e}")
                 finally:
