@@ -229,11 +229,26 @@ def _strip_leading_empty_paragraphs(xml_content: str) -> str:
         from lxml import etree
         NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
         NS_DRAW = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+
         root = etree.fromstring(xml_content)
+        tag = root.tag.split('}')[-1]
+
+        # Если корень — сам параграф (одиночный элемент без обёртки)
+        if tag == 'p':
+            text = ''.join(t.text or '' for t in root.iter(f'{{{NS_W}}}t'))
+            has_img = (
+                root.find(f'.//{{{NS_DRAW}}}inline') is not None or
+                root.find(f'.//{{{NS_DRAW}}}anchor') is not None
+            )
+            if not text.strip() and not has_img:
+                return '<block/>'  # пустой блок
+            return xml_content
+
+        # Корень — обёртка (block, body, и т.д.) — удаляем ведущие пустые параграфы
         for child in list(root):
-            tag = child.tag.split('}')[-1]
-            if tag != 'p':
-                break  # таблица или другой элемент — не трогаем
+            ctag = child.tag.split('}')[-1]
+            if ctag != 'p':
+                break
             text = ''.join(t.text or '' for t in child.iter(f'{{{NS_W}}}t'))
             has_img = (
                 child.find(f'.//{{{NS_DRAW}}}inline') is not None or
@@ -242,7 +257,8 @@ def _strip_leading_empty_paragraphs(xml_content: str) -> str:
             if not text.strip() and not has_img:
                 root.remove(child)
             else:
-                break  # первый непустой параграф — останавливаемся
+                break
+
         return etree.tostring(root, encoding='unicode')
     except Exception:
         return xml_content
