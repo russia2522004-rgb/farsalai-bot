@@ -531,12 +531,10 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
     if content_para is None:
         raise ValueError("Плейсхолдер {{CONTENT}} не найден в шаблоне")
 
-    for run in content_para.runs:
-        run.text = ''
+    insert_after = content_para._element.getprevious()
+    content_para._element.getparent().remove(content_para._element)
 
-    insert_after = content_para._element
-
-    # Убираем пустые параграфы сразу после {{CONTENT}} в шаблоне
+    # Убираем пустые параграфы которые идут сразу после места вставки в шаблоне
     NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     next_elem = insert_after.getnext()
     while next_elem is not None:
@@ -599,6 +597,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
 
             if xml_content:
                 print(f"DEBUG block_type={block_type} xml_start={repr(xml_content[:150])}")
+                print(f"DEBUG первые 3 тега: {[e.tag.split('}')[-1] for e in __import__('lxml.etree', fromlist=['etree']).etree.fromstring(xml_content)[:3]] if True else []}")
                 xml_content = _strip_leading_empty_paragraphs(xml_content)
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
