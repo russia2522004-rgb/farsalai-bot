@@ -598,6 +598,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                 rid_map = _add_images_to_doc(doc, images_b64, orig_rids)
 
             if xml_content:
+                print(f"DEBUG block_type={block_type} xml_start={repr(xml_content[:150])}")
                 xml_content = _strip_leading_empty_paragraphs(xml_content)
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
