@@ -247,7 +247,8 @@ def _strip_empty_paragraphs(xml_content: str) -> str:
             text = ''.join(t.text or '' for t in elem.iter(f'{{{NS_W}}}t'))
             has_img = (elem.find(f'.//{{{NS_DRAW}}}inline') is not None or
                        elem.find(f'.//{{{NS_DRAW}}}anchor') is not None)
-            return not text.strip() and not has_img
+            has_pb = any(br.get(f'{{{NS_W}}}type') == 'page' for br in elem.iter(f'{{{NS_W}}}br'))
+            return not text.strip() and not has_img and not has_pb
 
         # Убираем ведущие пустые параграфы
         for child in list(root):

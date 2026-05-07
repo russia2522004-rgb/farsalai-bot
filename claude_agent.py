@@ -282,6 +282,20 @@ def extract_blocks_from_docx(doc_path: str) -> list:
 
             # Сохраняем предыдущий блок
             if current_block and current_elements:
+                # Если последний элемент перед этим заголовком — параграф с разрывом страницы,
+                # добавляем его в конец предыдущего блока
+                prev_idx = elements.index(elem) - 1
+                if prev_idx >= 0:
+                    prev_elem = elements[prev_idx]
+                    prev_tag = prev_elem.tag.split('}')[-1] if '}' in prev_elem.tag else prev_elem.tag
+                    if prev_tag == 'p':
+                        has_pb = any(
+                            br.get(f'{{{NS}}}type') == 'page'
+                            for br in prev_elem.iter(f'{{{NS}}}br')
+                        )
+                        if has_pb and prev_elem not in current_elements:
+                            current_elements.append(prev_elem)
+
                 wrapper = et.Element('block')
                 for e in current_elements:
                     wrapper.append(copy.deepcopy(e))
@@ -290,7 +304,7 @@ def extract_blocks_from_docx(doc_path: str) -> list:
                     'type': current_block['type'],
                     'title': current_block['title'],
                     'xml': et.tostring(wrapper, encoding='unicode'),
-                    'images': [], 'images_base64': images_b64  # локальные пути к картинкам
+                    'images': [], 'images_base64': images_b64
                 })
             current_block = {'type': block_type, 'title': block_title}
             current_elements = []
