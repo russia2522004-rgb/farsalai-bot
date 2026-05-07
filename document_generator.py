@@ -534,7 +534,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
     insert_after = content_para._element.getprevious()
     content_para._element.getparent().remove(content_para._element)
 
-    # Убираем пустые параграфы которые идут сразу после места вставки в шаблоне
+    # Убираем пустые параграфы после места вставки (бывшие после {{CONTENT}})
     NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     next_elem = insert_after.getnext()
     while next_elem is not None:
@@ -544,6 +544,22 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             if not text.strip():
                 to_remove = next_elem
                 next_elem = next_elem.getnext()
+                to_remove.getparent().remove(to_remove)
+            else:
+                break
+        else:
+            break
+
+    # Убираем пустые параграфы перед местом вставки (бывшие до {{CONTENT}})
+    prev_elem = insert_after
+    while prev_elem is not None:
+        tag = prev_elem.tag.split('}')[-1]
+        if tag == 'p':
+            text = ''.join(t.text or '' for t in prev_elem.iter(f'{{{NS_W}}}t'))
+            if not text.strip():
+                to_remove = prev_elem
+                prev_elem = prev_elem.getprevious()
+                insert_after = prev_elem
                 to_remove.getparent().remove(to_remove)
             else:
                 break
