@@ -223,8 +223,8 @@ def _add_images_to_doc(doc, images_b64: list, orig_rids: list = None) -> dict:
     return rid_map
 
 
-def _strip_leading_empty_paragraphs(xml_content: str) -> str:
-    """Убирает пустые параграфы в начале XML блока (без картинок)."""
+def _strip_empty_paragraphs(xml_content: str) -> str:
+    """Убирает пустые параграфы в начале и конце XML блока (без картинок)."""
     try:
         from lxml import etree
         NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
@@ -233,28 +233,32 @@ def _strip_leading_empty_paragraphs(xml_content: str) -> str:
         root = etree.fromstring(xml_content)
         tag = root.tag.split('}')[-1]
 
-        # Если корень — сам параграф (одиночный элемент без обёртки)
         if tag == 'p':
             text = ''.join(t.text or '' for t in root.iter(f'{{{NS_W}}}t'))
-            has_img = (
-                root.find(f'.//{{{NS_DRAW}}}inline') is not None or
-                root.find(f'.//{{{NS_DRAW}}}anchor') is not None
-            )
+            has_img = (root.find(f'.//{{{NS_DRAW}}}inline') is not None or
+                       root.find(f'.//{{{NS_DRAW}}}anchor') is not None)
             if not text.strip() and not has_img:
-                return '<block/>'  # пустой блок
+                return '<block/>'
             return xml_content
 
-        # Корень — обёртка (block, body, и т.д.) — удаляем ведущие пустые параграфы
+        def is_empty_p(elem):
+            if elem.tag.split('}')[-1] != 'p':
+                return False
+            text = ''.join(t.text or '' for t in elem.iter(f'{{{NS_W}}}t'))
+            has_img = (elem.find(f'.//{{{NS_DRAW}}}inline') is not None or
+                       elem.find(f'.//{{{NS_DRAW}}}anchor') is not None)
+            return not text.strip() and not has_img
+
+        # Убираем ведущие пустые параграфы
         for child in list(root):
-            ctag = child.tag.split('}')[-1]
-            if ctag != 'p':
+            if is_empty_p(child):
+                root.remove(child)
+            else:
                 break
-            text = ''.join(t.text or '' for t in child.iter(f'{{{NS_W}}}t'))
-            has_img = (
-                child.find(f'.//{{{NS_DRAW}}}inline') is not None or
-                child.find(f'.//{{{NS_DRAW}}}anchor') is not None
-            )
-            if not text.strip() and not has_img:
+
+        # Убираем хвостовые пустые параграфы
+        for child in reversed(list(root)):
+            if is_empty_p(child):
                 root.remove(child)
             else:
                 break
@@ -611,7 +615,7 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                 rid_map = _add_images_to_doc(doc, images_b64, orig_rids)
 
             if xml_content:
-                xml_content = _strip_leading_empty_paragraphs(xml_content)
+                xml_content = _strip_empty_paragraphs(xml_content)
                 _insert_xml_block(doc, insert_after, xml_content, rid_map if rid_map else None)
 
                 # Если после вставки две таблицы идут подряд — добавляем пустой параграф между ними
