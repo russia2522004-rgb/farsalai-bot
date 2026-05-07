@@ -373,11 +373,13 @@ def _add_conditions_block(doc, insert_after_elem, item: dict, eq: dict):
     # Нижняя линия
     _add_horizontal_line(doc, insert_after_elem)
 
-    for label, value in conditions:
+    for i, (label, value) in enumerate(conditions):
         p = doc.add_paragraph()
         pPr = p._element.get_or_add_pPr()
         kl = OxmlElement('w:keepLines')
         pPr.append(kl)
+        kn = OxmlElement('w:keepNext')
+        pPr.append(kn)
         run_label = p.add_run(label + ' ')
         run_label.bold = True
         run_label.font.size = Pt(10)
