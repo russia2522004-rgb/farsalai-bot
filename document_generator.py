@@ -724,6 +724,26 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
             sep = doc.add_paragraph()
             insert_after.addnext(sep._element)
 
+    # Финальная очистка — убираем двойные пустые параграфы подряд
+    NS_W_F = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    DRAW_NS_F = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+    body_elems = list(doc.element.body)
+    i = 0
+    while i < len(body_elems) - 1:
+        curr = body_elems[i]
+        nxt = body_elems[i + 1]
+        if curr.tag.split('}')[-1] == 'p' and nxt.tag.split('}')[-1] == 'p':
+            curr_text = ''.join(t.text or '' for t in curr.iter(f'{{{NS_W_F}}}t'))
+            nxt_text = ''.join(t.text or '' for t in nxt.iter(f'{{{NS_W_F}}}t'))
+            curr_img = curr.find(f'.//{{{DRAW_NS_F}}}inline') is not None or curr.find(f'.//{{{DRAW_NS_F}}}anchor') is not None
+            nxt_img = nxt.find(f'.//{{{DRAW_NS_F}}}inline') is not None or nxt.find(f'.//{{{DRAW_NS_F}}}anchor') is not None
+            curr_pb = any(br.get(f'{{{NS_W_F}}}type') == 'page' for br in curr.iter(f'{{{NS_W_F}}}br'))
+            if not curr_text.strip() and not curr_img and not curr_pb and not nxt_text.strip() and not nxt_img:
+                curr.getparent().remove(curr)
+                body_elems = list(doc.element.body)
+                continue
+        i += 1
+
     docx_path = os.path.join(OUTPUT_DIR, f'КП_{kp_number}.docx')
     doc.save(docx_path)
     pdf_path = _convert_to_pdf(kp_data, kp_number)
