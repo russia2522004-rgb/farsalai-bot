@@ -331,16 +331,15 @@ def _insert_xml_block(doc, insert_after_elem, xml_content: str, rid_map: dict = 
                             for th in trPr.findall(f'{{{NS}}}tblHeader'):
                                 trPr.remove(th)
                 _set_cant_split_all_rows(first_inserted)
-                anchor = OxmlElement('w:p')
-                anchorPr = OxmlElement('w:pPr')
-                kn = OxmlElement('w:keepNext')
-                anchorPr.append(kn)
-                spacing = OxmlElement('w:spacing')
-                spacing.set(qn('w:before'), '0')
-                spacing.set(qn('w:after'), '0')
-                anchorPr.append(spacing)
-                anchor.append(anchorPr)
-                first_inserted.addprevious(anchor)
+                # keepNext на первой строке таблицы вместо якорного параграфа
+                tr_list = first_inserted.findall(f'{{{NS}}}tr')
+                if tr_list:
+                    trPr = tr_list[0].find(f'{{{NS}}}trPr')
+                    if trPr is None:
+                        trPr = OxmlElement('w:trPr')
+                        tr_list[0].insert(0, trPr)
+                    kn = OxmlElement('w:keepNext')
+                    trPr.append(kn)
             elif first_type == 'image':
                 if tag == 'p':
                     _set_keep_next(first_inserted)
