@@ -627,19 +627,8 @@ def generate_kp_document(kp_data: dict, manager_name: str) -> tuple[str, str]:
                     if t1 == 'tbl' and t2 == 'tbl':
                         spacer2 = OxmlElement('w:p')
                         elems[j].addnext(spacer2)
-                body = doc.element.body
-                elems = list(body)
-                for j in range(len(elems) - 1):
-                    t1 = elems[j].tag.split('}')[-1]
-                    t2 = elems[j+1].tag.split('}')[-1]
-                    if t1 == 'tbl' and t2 == 'tbl':
-                        spacer2 = OxmlElement('w:p')
-                        elems[j].addnext(spacer2)
 
             if block_title and block_type != 'photo':
-                # Пустая строка перед заголовком раздела
-                spacer = OxmlElement('w:p')
-                insert_after.addnext(spacer)
                 _add_section_title(doc, insert_after, block_title, number=block_number)
 
         # Разрыв страницы после фото (если есть блок photo или photo_path)
